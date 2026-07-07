@@ -4,7 +4,7 @@
  * Manages data fetching for all data sources defined in a page
  */
 
-import { useQueries, useQueryClient } from '@tanstack/react-query';
+import { useQueries } from '@tanstack/react-query';
 import { useMemo, useCallback } from 'react';
 import { supabase } from '@/data/supabase';
 import { executeSupabaseQuery, createQueryKey } from '@/data/queryBuilder';
