@@ -96,7 +96,7 @@ describe('useMeetingNotes Hooks', () => {
         workflow_id: 'extract-note-123',
         status: 'processing'
       });
-      expect(global.fetch).toHaveBeenCalledWith(
+      expect(mockFetch).toHaveBeenCalledWith(
         'http://localhost:8000/trigger-workflow',
         expect.objectContaining({
           method: 'POST',
