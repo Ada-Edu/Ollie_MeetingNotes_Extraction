@@ -351,11 +351,6 @@ test.describe('Status Polling Behavior', () => {
     await page.waitForSelector('[data-status="processing"]');
     await page.waitForTimeout(3000);
 
-    // Track active intervals before unmount
-    const intervalsBefore = await page.evaluate(() => {
-      return (window as any).__activeIntervals?.size || 0;
-    });
-
     // Navigate away (unmount component)
     await page.goto('/about');
     await page.waitForTimeout(1000);

@@ -86,7 +86,7 @@ describe('ActionItemsList', () => {
     });
 
     it('should apply correct confidence color classes', () => {
-      const { container } = render(<ActionItemsList items={mockActionItems} />);
+      render(<ActionItemsList items={mockActionItems} />);
 
       const highConfidence = screen.getByText('95%');
       expect(highConfidence).toHaveClass('text-green-600', 'font-medium');

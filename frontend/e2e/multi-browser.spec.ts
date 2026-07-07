@@ -1,9 +1,7 @@
-import { test, expect, Browser, BrowserContext, Page } from '@playwright/test';
-
-const browsers = ['chromium', 'firefox', 'webkit'] as const;
+import { test, expect } from '@playwright/test';
 
 test.describe('Multi-Browser Compatibility', () => {
-  test('should render meeting notes form in all browsers', async ({ page, browserName }) => {
+  test('should render meeting notes form in all browsers', async ({ page }) => {
     await page.goto('/meeting-notes');
 
     // Verify core functionality works

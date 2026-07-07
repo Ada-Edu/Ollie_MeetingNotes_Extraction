@@ -92,7 +92,7 @@ describe('ActionItemsList', () => {
         confidence: 0.9,
         created_at: '2026-07-07T10:00:00Z'
       }];
-      const { container } = render(<ActionItemsList items={items} />);
+      render(<ActionItemsList items={items} />);
       const confidenceSpan = screen.getByText('90%');
       expect(confidenceSpan).toHaveClass('text-green-600');
     });

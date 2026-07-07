@@ -1,4 +1,4 @@
-import { test, expect, Page } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 
 test.describe('Complete Meeting Notes Extraction Flow', () => {
   const TEST_NOTES = `

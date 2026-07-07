@@ -101,7 +101,6 @@ test.describe('Accessibility Tests', () => {
         await button.focus();
 
         // Track state change to verify activation worked
-        const buttonText = await button.textContent();
         const initialUrl = page.url();
 
         await page.keyboard.press('Enter');
