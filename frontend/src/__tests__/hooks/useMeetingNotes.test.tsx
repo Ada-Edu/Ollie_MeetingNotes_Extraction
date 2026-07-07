@@ -76,10 +76,10 @@ describe('useMeetingNotes Hooks', () => {
       });
 
       // Mock fetch for workflow trigger
-      (global.fetch as any).mockResolvedValue({
+      vi.mocked(global.fetch).mockResolvedValue({
         ok: true,
         json: async () => ({ success: true, workflow_id: 'extract-note-123' })
-      });
+      } as Response);
 
       const { result } = renderHook(() => useCreateMeetingNote(), { wrapper });
 
@@ -150,11 +150,11 @@ describe('useMeetingNotes Hooks', () => {
         }
       });
 
-      (global.fetch as any).mockResolvedValue({
+      vi.mocked(global.fetch).mockResolvedValue({
         ok: false,
         statusText: 'Internal Server Error',
         json: async () => ({ detail: 'Workflow service unavailable' })
-      });
+      } as Response);
 
       const { result } = renderHook(() => useCreateMeetingNote(), { wrapper });
 
@@ -187,10 +187,10 @@ describe('useMeetingNotes Hooks', () => {
         }
       });
 
-      (global.fetch as any).mockResolvedValue({
+      vi.mocked(global.fetch).mockResolvedValue({
         ok: true,
         json: async () => ({ success: true })
-      });
+      } as Response);
 
       const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries');
 
