@@ -22,10 +22,10 @@ dev = [
   "pytest-httpx>=0.36.0",
   "freezegun>=1.5.0",
   "faker>=40.0.0",
-  "fastapi>=0.115.0",
-  "sqlalchemy>=2.0.0",
-  "azure-core>=1.30.0",
-  "supabase>=2.0.0"
+  "fastapi==0.115.6",
+  "sqlalchemy==2.0.36",
+  "azure-core==1.30.2",
+  "supabase==2.10.0"
 ]
 
 [build-system]
