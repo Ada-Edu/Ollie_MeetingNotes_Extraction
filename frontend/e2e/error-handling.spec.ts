@@ -61,7 +61,7 @@ test.describe('Error Handling Flow', () => {
     await notesInput.fill(testText);
 
     // Counter should update
-    await expect(page.getByText(new RegExp(`${testText.length} \/ 10,000`, 'i'))).toBeVisible();
+    await expect(page.getByText(new RegExp(`${testText.length} / 10,000`, 'i'))).toBeVisible();
   });
 
   test('should handle API server unavailable', async ({ page }) => {

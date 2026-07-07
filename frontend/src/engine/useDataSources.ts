@@ -74,8 +74,6 @@ export function useDataSources(
   dataSources: Record<string, DataSourceDefinition> | undefined,
   context: ExpressionContext
 ): UseDataSourcesResult {
-  const queryClient = useQueryClient();
-
   // Create query configurations for each data source
   const sourceEntries = useMemo(() => {
     return Object.entries(dataSources || {});

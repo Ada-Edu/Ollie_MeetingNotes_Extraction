@@ -5,7 +5,7 @@
 import { createRootRoute, Outlet, Link, useLocation } from '@tanstack/react-router';
 import { TanStackRouterDevtools } from '@tanstack/router-devtools';
 import { cn } from '@/lib/utils';
-import { Home, Box, Users, Building2, FolderOpen, FileQuestion, ClipboardCheck, FileText, UserCircle, UsersRound, FileSpreadsheet } from 'lucide-react';
+import { FileSpreadsheet } from 'lucide-react';
 
 export const Route = createRootRoute({
   component: RootComponent,

@@ -2,7 +2,6 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../supabase';
 import type { Database } from '../supabase';
 
-type Entity = Database['public']['Tables']['entities']['Row'];
 type EntityInsert = Database['public']['Tables']['entities']['Insert'];
 type EntityUpdate = Database['public']['Tables']['entities']['Update'];
 

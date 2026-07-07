@@ -15,7 +15,6 @@ const hasSupabaseConfig = import.meta.env.VITE_SUPABASE_URL && import.meta.env.V
 
 // Only import supabase if env vars are available
 let supabase: any;
-let useCreateMeetingNote: any;
 let useExtractionRun: any;
 let useExtractionRuns: any;
 
@@ -23,7 +22,6 @@ if (hasSupabaseConfig) {
   const supabaseModule = await import('@/lib/supabase');
   const hooksModule = await import('@/lib/hooks/useMeetingNotes');
   supabase = supabaseModule.supabase;
-  useCreateMeetingNote = hooksModule.useCreateMeetingNote;
   useExtractionRun = hooksModule.useExtractionRun;
   useExtractionRuns = hooksModule.useExtractionRuns;
 }
@@ -46,9 +44,11 @@ function createWrapper() {
       },
     },
   });
-  return ({ children }: { children: ReactNode }) => (
+  const Wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
+  Wrapper.displayName = 'TestWrapper';
+  return Wrapper;
 }
 
 describe.skipIf(!hasSupabaseConfig)('Supabase API Integration - Meeting Notes Tables', () => {
