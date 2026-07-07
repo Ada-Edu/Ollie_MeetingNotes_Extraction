@@ -11,7 +11,6 @@ import { executeSupabaseQuery, createQueryKey } from '@/data/queryBuilder';
 import { evaluateExpression } from './ExpressionEvaluator';
 import type {
   DataSourceDefinition,
-  SupabaseDataSource,
   ApiDataSource,
   StaticDataSource,
   ExpressionContext,
