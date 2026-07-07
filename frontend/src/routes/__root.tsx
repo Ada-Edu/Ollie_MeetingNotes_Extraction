@@ -1,0 +1,81 @@
+/**
+ * Root Route - App Shell
+ */
+
+import { createRootRoute, Outlet, Link, useLocation } from '@tanstack/react-router';
+import { TanStackRouterDevtools } from '@tanstack/router-devtools';
+import { cn } from '@/lib/utils';
+import { Home, Box, Users, Building2, FolderOpen, FileQuestion, ClipboardCheck, FileText, UserCircle, UsersRound, FileSpreadsheet } from 'lucide-react';
+
+export const Route = createRootRoute({
+  component: RootComponent,
+});
+
+function RootComponent() {
+  return (
+    <div className="min-h-screen bg-background">
+      <Header />
+      <div className="flex">
+        <Sidebar />
+        <main className="flex-1 p-6">
+          <Outlet />
+        </main>
+      </div>
+      {import.meta.env.DEV && (
+        <TanStackRouterDevtools position="bottom-right" />
+      )}
+    </div>
+  );
+}
+
+function Header() {
+  return (
+    <header className="h-16 border-b bg-card flex items-center px-6">
+      <h1 className="text-xl font-semibold">Meeting Notes AI Extractor</h1>
+    </header>
+  );
+}
+
+function NavLink({ to, icon: Icon, label }: { to: string; icon: React.ComponentType<{ className?: string }>; label: string }) {
+  const location = useLocation();
+  const isActive = location.pathname.includes(`/entities/${to}`);
+
+  return (
+    <Link
+      to="/entities/$entityType"
+      params={{ entityType: to }}
+      className={cn(
+        'flex items-center gap-3 px-3 py-2 rounded-lg transition-colors',
+        isActive
+          ? 'bg-primary text-primary-foreground'
+          : 'hover:bg-muted'
+      )}
+    >
+      <Icon className="h-4 w-4" />
+      {label}
+    </Link>
+  );
+}
+
+function Sidebar() {
+  const location = useLocation();
+
+  return (
+    <aside className="w-64 border-r bg-card min-h-[calc(100vh-4rem)]">
+      <nav className="p-4 space-y-2">
+        <Link
+          to="/meeting-notes"
+          className={cn(
+            'flex items-center gap-3 px-3 py-2 rounded-lg transition-colors',
+            location.pathname === '/meeting-notes'
+              ? 'bg-primary text-primary-foreground'
+              : 'hover:bg-muted'
+          )}
+        >
+          <FileSpreadsheet className="h-4 w-4" />
+          Meeting Notes Extraction
+        </Link>
+      </nav>
+    </aside>
+  );
+}
