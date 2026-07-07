@@ -13,7 +13,8 @@ vi.mock('@/lib/supabase', () => ({
 }));
 
 // Mock fetch for workflow API
-global.fetch = vi.fn();
+const mockFetch = vi.fn();
+global.fetch = mockFetch as any;
 
 describe('useMeetingNotes Hooks', () => {
   let queryClient: QueryClient;
@@ -76,7 +77,7 @@ describe('useMeetingNotes Hooks', () => {
       });
 
       // Mock fetch for workflow trigger
-      vi.mocked(global.fetch).mockResolvedValue({
+      mockFetch.mockResolvedValue({
         ok: true,
         json: async () => ({ success: true, workflow_id: 'extract-note-123' })
       } as Response);
@@ -150,7 +151,7 @@ describe('useMeetingNotes Hooks', () => {
         }
       });
 
-      vi.mocked(global.fetch).mockResolvedValue({
+      mockFetch.mockResolvedValue({
         ok: false,
         statusText: 'Internal Server Error',
         json: async () => ({ detail: 'Workflow service unavailable' })
@@ -187,7 +188,7 @@ describe('useMeetingNotes Hooks', () => {
         }
       });
 
-      vi.mocked(global.fetch).mockResolvedValue({
+      mockFetch.mockResolvedValue({
         ok: true,
         json: async () => ({ success: true })
       } as Response);
