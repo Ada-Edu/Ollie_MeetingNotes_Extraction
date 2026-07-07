@@ -1,9 +1,10 @@
 module.exports = {
   env: {
     browser: true,
-    es2021: true
+    es2021: true,
+    node: true
   },
-  extends: ['eslint:recommended', 'plugin:react/recommended'],
+  extends: ['eslint:recommended', 'plugin:react/recommended', 'plugin:react/jsx-runtime'],
   parserOptions: {
     ecmaVersion: 'latest',
     sourceType: 'module'
@@ -14,5 +15,8 @@ module.exports = {
     }
   },
   plugins: ['react'],
-  rules: {}
+  rules: {
+    'react/react-in-jsx-scope': 'off',
+    'no-unused-vars': ['error', { argsIgnorePattern: '^_' }]
+  }
 };
