@@ -5,12 +5,28 @@
  * @group integration
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { supabase } from '@/lib/supabase';
-import { useCreateMeetingNote, useExtractionRun, useExtractionRuns } from '@/lib/hooks/useMeetingNotes';
 import type { ReactNode } from 'react';
+
+// Check if Supabase env vars are available
+const hasSupabaseConfig = import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+// Only import supabase if env vars are available
+let supabase: any;
+let useCreateMeetingNote: any;
+let useExtractionRun: any;
+let useExtractionRuns: any;
+
+if (hasSupabaseConfig) {
+  const supabaseModule = await import('@/lib/supabase');
+  const hooksModule = await import('@/lib/hooks/useMeetingNotes');
+  supabase = supabaseModule.supabase;
+  useCreateMeetingNote = hooksModule.useCreateMeetingNote;
+  useExtractionRun = hooksModule.useExtractionRun;
+  useExtractionRuns = hooksModule.useExtractionRuns;
+}
 
 // Test IDs for cleanup
 const testIds = {
@@ -35,7 +51,13 @@ function createWrapper() {
   );
 }
 
-describe('Supabase API Integration - Meeting Notes Tables', () => {
+describe.skipIf(!hasSupabaseConfig)('Supabase API Integration - Meeting Notes Tables', () => {
+  beforeAll(() => {
+    if (!hasSupabaseConfig) {
+      console.log('Skipping Supabase integration tests - missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY');
+    }
+  });
+
   beforeEach(async () => {
     // Clean up any existing test data
     await cleanupTestData();

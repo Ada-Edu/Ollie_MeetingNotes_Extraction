@@ -96,12 +96,14 @@ describe('EngineInput', () => {
             <EngineInput type={type} />
           </UIEngineContext.Provider>
         );
-        const input = screen.getByRole(
-          type === 'text' || type === 'email' || type === 'tel' || type === 'url' || type === 'search'
-            ? 'textbox'
-            : type === 'password'
-            ? 'textbox'
-            : 'spinbutton'
+        const input = type === 'search'
+          ? screen.getByRole('searchbox')
+          : type === 'password'
+          ? screen.getByDisplayValue('') // password inputs don't expose role
+          : screen.getByRole(
+              type === 'text' || type === 'email' || type === 'tel' || type === 'url'
+                ? 'textbox'
+                : 'spinbutton'
         );
         expect(input).toHaveAttribute('type', type);
       });

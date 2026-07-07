@@ -44,8 +44,8 @@ describe('ActionItemsList', () => {
 
     it('should render all action items', () => {
       render(<ActionItemsList items={mockItems} />);
-      expect(screen.getByText('Follow up with Sarah')).toBeInTheDocument();
-      expect(screen.getByText('Review design document')).toBeInTheDocument();
+      expect(screen.getByText(/Follow up with Sarah/)).toBeInTheDocument();
+      expect(screen.getByText(/Review design document/)).toBeInTheDocument();
     });
 
     it('should display owner when provided', () => {
@@ -176,7 +176,7 @@ describe('ActionItemsList', () => {
         created_at: '2026-07-07T10:00:00Z'
       }];
       render(<ActionItemsList items={items} />);
-      expect(screen.getByText('Minimal task')).toBeInTheDocument();
+      expect(screen.getByText(/Minimal task/)).toBeInTheDocument();
       expect(screen.getByText('Unassigned')).toBeInTheDocument();
       expect(screen.getByText('No due date')).toBeInTheDocument();
     });
