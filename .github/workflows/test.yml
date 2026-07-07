@@ -37,7 +37,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install --prefer-offline --no-audit
 
       - name: Run unit tests
         run: npm run test:unit
@@ -153,7 +153,7 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm ci
+        run: npm install --prefer-offline --no-audit
 
       - name: Install Playwright browsers
         working-directory: frontend
@@ -218,7 +218,7 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm ci
+        run: npm install --prefer-offline --no-audit
 
       - name: Run ESLint
         working-directory: frontend
