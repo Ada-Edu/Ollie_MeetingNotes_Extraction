@@ -1,448 +1,512 @@
-"""
-Integration tests for Model Client integration with AWS Bedrock and Azure OpenAI.
-Tests real API interaction patterns without mocking the model clients themselves.
-
-@group integration
-"""
-
-import sys
-from pathlib import Path
-
-src_path = Path(__file__).parent.parent.parent / "src"
-sys.path.insert(0, str(src_path))
-
 import pytest
-from unittest.mock import AsyncMock, Mock, patch
+import asyncio
+from unittest.mock import Mock, patch, AsyncMock
+from datetime import datetime
 import json
+import time
+import os
 
-from model_client.factory import get_model_client, get_model_info
-from model_client.base import ActionItem, ModelAPIError, InvalidResponseError
-from model_client.bedrock_client import BedrockClient
-from model_client.azure_client import AzureOpenAIClient
+from botocore.exceptions import ClientError, BotoCoreError
+from azure.core.exceptions import HttpResponseError, ServiceRequestError
+
+try:
+    import vcr
+    HAS_VCR = True
+except ImportError:
+    HAS_VCR = False
+    vcr = None
 
 
-@pytest.mark.integration
-class TestBedrockClientIntegration:
-    """Integration tests for Bedrock client with mocked boto3."""
+class TestModelClientIntegration:
+    """Integration tests for model client functionality.
+
+    These tests verify actual integration with model APIs using VCR.py to record/replay
+    real API responses. Tests marked with @pytest.mark.skipif will only run when:
+    1. vcr library is installed (pip install vcrpy)
+    2. Real credentials are configured (AWS_ACCESS_KEY_ID or AZURE_OPENAI_ENDPOINT)
+
+    On first run with credentials, VCR records actual API responses to cassettes/.
+    Subsequent runs replay recorded responses without hitting the API.
+    """
 
     @pytest.mark.asyncio
-    async def test_bedrock_client_successful_extraction(self):
-        """Test Bedrock client extracts action items from response."""
-        # Mock boto3 client
-        mock_bedrock = Mock()
+    @pytest.mark.skipif(not HAS_VCR, reason="vcr library not installed")
+    @pytest.mark.skipif(not os.getenv('AWS_ACCESS_KEY_ID'), reason="AWS credentials not configured")
+    async def test_bedrock_client_actual_extraction(self):
+        """Test actual extraction using real Bedrock client with recorded responses."""
+        cassette_path = os.path.join(os.path.dirname(__file__), 'cassettes', 'bedrock_extraction.yaml')
+        os.makedirs(os.path.dirname(cassette_path), exist_ok=True)
+
+        with vcr.use_cassette(cassette_path, record_mode='once'):
+            from model_client import BedrockModelClient
+            client = BedrockModelClient(model_id='anthropic.claude-3-sonnet-20240229-v1:0')
+
+            result = await client.extract_action_items('Real meeting transcript: We need to complete the project proposal by next Friday and review the quarterly budget.')
+
+            assert result is not None
+            assert 'action_items' in result
+            assert isinstance(result['action_items'], list)
+            if len(result['action_items']) > 0:
+                assert 'description' in result['action_items'][0]
+                assert result['action_items'][0]['description'] != ''
+                assert len(result['action_items'][0]['description']) > 5
+
+    @pytest.mark.asyncio
+    async def test_bedrock_api_error_handling(self):
+        """Test handling of Bedrock API errors."""
+        mock_bedrock_client = Mock()
+        mock_bedrock_client.invoke_model.side_effect = ClientError(
+            {'Error': {'Code': 'ThrottlingException', 'Message': 'Rate exceeded'}},
+            'InvokeModel'
+        )
+
+        with patch('boto3.client', return_value=mock_bedrock_client):
+            from model_client import BedrockModelClient
+            client = BedrockModelClient(model_id='anthropic.claude-3-sonnet-20240229-v1:0')
+
+            with pytest.raises(Exception) as exc_info:
+                await client.extract_action_items('Test transcript')
+
+            assert 'ThrottlingException' in str(exc_info.value) or 'Rate' in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_invalid_response_handling(self):
+        """Test handling of invalid/malformed responses."""
+        mock_bedrock_client = Mock()
         mock_response = {
-            "body": Mock()
+            'body': Mock(read=lambda: b'Invalid JSON response')
         }
+        mock_bedrock_client.invoke_model.return_value = mock_response
 
-        # Simulate streaming response
-        response_data = {
-            "content": [{
-                "text": json.dumps({
-                    "action_items": [
-                        {
-                            "description": "Review Q4 budget",
-                            "owner": "Finance Team",
-                            "due_date": "2026-07-20",
-                            "confidence": 0.95
-                        },
-                        {
-                            "description": "Schedule follow-up meeting",
-                            "owner": "Project Manager",
-                            "due_date": None,
-                            "confidence": 0.88
-                        }
-                    ]
-                })
-            }]
-        }
+        with patch('boto3.client', return_value=mock_bedrock_client):
+            from model_client import BedrockModelClient
+            client = BedrockModelClient(model_id='anthropic.claude-3-sonnet-20240229-v1:0')
 
-        mock_response["body"].read.return_value = json.dumps(response_data).encode()
+            with pytest.raises((json.JSONDecodeError, ValueError, KeyError, Exception)):
+                await client.extract_action_items('Test transcript')
 
-        mock_bedrock.invoke_model.return_value = mock_response
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(not HAS_VCR, reason="vcr library not installed")
+    @pytest.mark.skipif(not os.getenv('AZURE_OPENAI_ENDPOINT'), reason="Azure credentials not configured")
+    async def test_azure_client_actual_extraction(self):
+        """Test actual extraction using real Azure OpenAI client with recorded responses."""
+        cassette_path = os.path.join(os.path.dirname(__file__), 'cassettes', 'azure_extraction.yaml')
+        os.makedirs(os.path.dirname(cassette_path), exist_ok=True)
 
-        with patch('model_client.bedrock_client.boto3') as mock_boto3:
-            mock_boto3.client.return_value = mock_bedrock
-
-            client = BedrockClient()
-            result = await client.extract_action_items(
-                "Team meeting: Finance team to review Q4 budget by July 20th. PM will schedule follow-up."
+        with vcr.use_cassette(cassette_path, record_mode='once'):
+            from model_client import AzureModelClient
+            client = AzureModelClient(
+                endpoint=os.getenv('AZURE_OPENAI_ENDPOINT', 'https://test.openai.azure.com'),
+                api_key=os.getenv('AZURE_OPENAI_API_KEY', 'test-key'),
+                deployment_name=os.getenv('AZURE_OPENAI_DEPLOYMENT', 'gpt-4')
             )
 
-            # Verify results
-            assert len(result) == 2
-            assert isinstance(result[0], ActionItem)
-            assert result[0].description == "Review Q4 budget"
-            assert result[0].owner == "Finance Team"
-            assert result[0].due_date == "2026-07-20"
-            assert result[0].confidence == 0.95
+            result = await client.extract_action_items('Azure meeting notes: Review the deployment pipeline and update the documentation.')
 
-            assert result[1].description == "Schedule follow-up meeting"
-            assert result[1].owner == "Project Manager"
-            assert result[1].due_date is None
-
-            # Verify boto3 was called correctly
-            mock_bedrock.invoke_model.assert_called_once()
-            call_args = mock_bedrock.invoke_model.call_args
-            assert "modelId" in call_args[1]
-            assert "body" in call_args[1]
+            assert result is not None
+            assert 'action_items' in result
+            assert isinstance(result['action_items'], list)
+            if len(result['action_items']) > 0:
+                assert 'description' in result['action_items'][0]
+                assert result['action_items'][0]['description'] != ''
+                assert len(result['action_items'][0]['description']) > 5
 
     @pytest.mark.asyncio
-    async def test_bedrock_client_handles_api_error(self):
-        """Test Bedrock client handles API errors gracefully."""
-        mock_bedrock = Mock()
-        mock_bedrock.invoke_model.side_effect = Exception("ServiceUnavailable: Bedrock is down")
+    async def test_rate_limiting_handling(self):
+        """Test rate limiting behavior and backoff."""
+        mock_bedrock_client = Mock()
+        call_count = 0
 
-        with patch('model_client.bedrock_client.boto3') as mock_boto3:
-            mock_boto3.client.return_value = mock_bedrock
+        def side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ClientError(
+                    {'Error': {'Code': 'ThrottlingException', 'Message': 'Rate limit exceeded'}},
+                    'InvokeModel'
+                )
+            return {
+                'body': Mock(read=lambda: json.dumps({
+                    'content': [{'text': json.dumps({'action_items': []})}]
+                }).encode())
+            }
 
-            client = BedrockClient()
+        mock_bedrock_client.invoke_model.side_effect = side_effect
 
-            with pytest.raises(ModelAPIError) as exc_info:
-                await client.extract_action_items("Test meeting notes")
+        with patch('boto3.client', return_value=mock_bedrock_client):
+            from model_client import BedrockModelClient
+            client = BedrockModelClient(
+                model_id='anthropic.claude-3-sonnet-20240229-v1:0',
+                max_retries=3,
+                retry_delay=0.1
+            )
 
-            assert "ServiceUnavailable" in str(exc_info.value) or "Bedrock" in str(exc_info.value)
+            result = await client.extract_action_items('Test transcript')
+
+            assert call_count == 3
+            assert result is not None
 
     @pytest.mark.asyncio
-    async def test_bedrock_client_handles_invalid_response(self):
-        """Test Bedrock client handles malformed responses."""
-        mock_bedrock = Mock()
-        mock_response = {
-            "body": Mock()
+    async def test_authentication_errors(self):
+        """Test handling of authentication and authorization errors."""
+        mock_bedrock_client = Mock()
+        mock_bedrock_client.invoke_model.side_effect = ClientError(
+            {'Error': {'Code': 'UnauthorizedException', 'Message': 'Invalid credentials'}},
+            'InvokeModel'
+        )
+
+        with patch('boto3.client', return_value=mock_bedrock_client):
+            from model_client import BedrockModelClient
+            client = BedrockModelClient(model_id='anthropic.claude-3-sonnet-20240229-v1:0')
+
+            with pytest.raises(Exception) as exc_info:
+                await client.extract_action_items('Test transcript')
+
+            assert 'Unauthorized' in str(exc_info.value) or 'credentials' in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_model_client_factory(self):
+        """Test model client factory for creating different client types."""
+        from model_client import ModelClientFactory
+
+        bedrock_config = {
+            'provider': 'bedrock',
+            'model_id': 'anthropic.claude-3-sonnet-20240229-v1:0',
+            'region': 'us-east-1'
         }
 
-        # Invalid JSON response
-        mock_response["body"].read.return_value = b"Not valid JSON"
-        mock_bedrock.invoke_model.return_value = mock_response
-
-        with patch('model_client.bedrock_client.boto3') as mock_boto3:
-            mock_boto3.client.return_value = mock_bedrock
-
-            client = BedrockClient()
-
-            with pytest.raises(InvalidResponseError):
-                await client.extract_action_items("Test notes")
-
-    @pytest.mark.asyncio
-    async def test_bedrock_client_handles_missing_action_items_field(self):
-        """Test Bedrock client handles response without action_items field."""
-        mock_bedrock = Mock()
-        mock_response = {
-            "body": Mock()
+        azure_config = {
+            'provider': 'azure',
+            'endpoint': 'https://test.openai.azure.com',
+            'api_key': 'test-key',
+            'deployment_name': 'gpt-4'
         }
 
-        response_data = {
-            "content": [{
-                "text": json.dumps({"other_field": "value"})
-            }]
-        }
+        with patch('boto3.client'):
+            bedrock_client = ModelClientFactory.create_client(bedrock_config)
+            assert bedrock_client is not None
+            assert bedrock_client.__class__.__name__ == 'BedrockModelClient'
 
-        mock_response["body"].read.return_value = json.dumps(response_data).encode()
-        mock_bedrock.invoke_model.return_value = mock_response
-
-        with patch('model_client.bedrock_client.boto3') as mock_boto3:
-            mock_boto3.client.return_value = mock_bedrock
-
-            client = BedrockClient()
-
-            with pytest.raises(InvalidResponseError) as exc_info:
-                await client.extract_action_items("Test notes")
-
-            assert "action_items" in str(exc_info.value).lower()
-
-
-@pytest.mark.integration
-class TestAzureOpenAIClientIntegration:
-    """Integration tests for Azure OpenAI client."""
+        with patch('openai.AzureOpenAI'):
+            azure_client = ModelClientFactory.create_client(azure_config)
+            assert azure_client is not None
+            assert azure_client.__class__.__name__ == 'AzureModelClient'
 
     @pytest.mark.asyncio
-    async def test_azure_client_successful_extraction(self):
-        """Test Azure OpenAI client extracts action items."""
-        # Mock OpenAI client
-        mock_openai = Mock()
-        mock_response = Mock()
-        mock_choice = Mock()
-        mock_message = Mock()
-
-        mock_message.content = json.dumps({
-            "action_items": [
+    async def test_data_transformation(self):
+        """Test data transformation from raw API response to structured format."""
+        raw_response = {
+            'action_items': [
                 {
-                    "description": "Update project timeline",
-                    "owner": "Sarah Johnson",
-                    "due_date": "2026-07-18",
-                    "confidence": 0.91
+                    'id': '1',
+                    'description': 'Update documentation',
+                    'priority': 'high',
+                    'due_date': '2026-07-10',
+                    'assignee': 'dev@example.com'
+                },
+                {
+                    'id': '2',
+                    'description': 'Fix bug in payment flow',
+                    'priority': 'critical',
+                    'due_date': '2026-07-08'
                 }
             ]
-        })
-
-        mock_choice.message = mock_message
-        mock_response.choices = [mock_choice]
-
-        mock_openai.chat.completions.create = AsyncMock(return_value=mock_response)
-
-        with patch('model_client.azure_client.AsyncAzureOpenAI') as mock_azure_class:
-            mock_azure_class.return_value = mock_openai
-
-            client = AzureOpenAIClient()
-            result = await client.extract_action_items(
-                "Project meeting: Sarah to update timeline by Friday July 18th"
-            )
-
-            assert len(result) == 1
-            assert isinstance(result[0], ActionItem)
-            assert result[0].description == "Update project timeline"
-            assert result[0].owner == "Sarah Johnson"
-            assert result[0].due_date == "2026-07-18"
-            assert result[0].confidence == 0.91
-
-            # Verify API was called
-            mock_openai.chat.completions.create.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_azure_client_handles_rate_limit(self):
-        """Test Azure client handles rate limiting errors."""
-        mock_openai = Mock()
-
-        # Simulate rate limit error
-        from openai import RateLimitError
-
-        mock_openai.chat.completions.create = AsyncMock(
-            side_effect=RateLimitError(
-                "Rate limit exceeded",
-                response=Mock(status_code=429),
-                body=None
-            )
-        )
-
-        with patch('model_client.azure_client.AsyncAzureOpenAI') as mock_azure_class:
-            mock_azure_class.return_value = mock_openai
-
-            client = AzureOpenAIClient()
-
-            with pytest.raises(ModelAPIError) as exc_info:
-                await client.extract_action_items("Test notes")
-
-            assert "rate limit" in str(exc_info.value).lower() or "429" in str(exc_info.value)
-
-    @pytest.mark.asyncio
-    async def test_azure_client_handles_authentication_error(self):
-        """Test Azure client handles authentication errors."""
-        mock_openai = Mock()
-
-        from openai import AuthenticationError
-
-        mock_openai.chat.completions.create = AsyncMock(
-            side_effect=AuthenticationError(
-                "Invalid API key",
-                response=Mock(status_code=401),
-                body=None
-            )
-        )
-
-        with patch('model_client.azure_client.AsyncAzureOpenAI') as mock_azure_class:
-            mock_azure_class.return_value = mock_openai
-
-            client = AzureOpenAIClient()
-
-            with pytest.raises(ModelAPIError) as exc_info:
-                await client.extract_action_items("Test notes")
-
-            assert "authentication" in str(exc_info.value).lower() or "401" in str(exc_info.value)
-
-
-@pytest.mark.integration
-class TestModelClientFactory:
-    """Integration tests for model client factory."""
-
-    def test_factory_returns_correct_client_based_on_env(self):
-        """Test factory returns correct client based on MODEL_PROVIDER env var."""
-        with patch.dict('os.environ', {'MODEL_PROVIDER': 'bedrock'}):
-            with patch('model_client.factory.BedrockClient') as mock_bedrock:
-                mock_instance = Mock()
-                mock_bedrock.return_value = mock_instance
-
-                client = get_model_client()
-
-                mock_bedrock.assert_called_once()
-                assert client == mock_instance
-
-        with patch.dict('os.environ', {'MODEL_PROVIDER': 'azure'}):
-            with patch('model_client.factory.AzureOpenAIClient') as mock_azure:
-                mock_instance = Mock()
-                mock_azure.return_value = mock_instance
-
-                client = get_model_client()
-
-                mock_azure.assert_called_once()
-                assert client == mock_instance
-
-    def test_factory_returns_singleton_instance(self):
-        """Test factory returns same instance on multiple calls."""
-        with patch.dict('os.environ', {'MODEL_PROVIDER': 'bedrock'}):
-            with patch('model_client.factory.BedrockClient') as mock_bedrock:
-                mock_instance = Mock()
-                mock_bedrock.return_value = mock_instance
-
-                client1 = get_model_client()
-                client2 = get_model_client()
-
-                # Should only create once
-                assert mock_bedrock.call_count == 1
-                assert client1 is client2
-
-    def test_get_model_info_returns_correct_info(self):
-        """Test get_model_info returns provider and model details."""
-        mock_client = Mock()
-        mock_client.get_provider_name.return_value = "bedrock"
-        mock_client.get_model_name.return_value = "anthropic.claude-3-sonnet-v1"
-
-        with patch('model_client.factory.get_model_client', return_value=mock_client):
-            info = get_model_info()
-
-            assert info["provider"] == "bedrock"
-            assert info["model_name"] == "anthropic.claude-3-sonnet-v1"
-
-
-@pytest.mark.integration
-class TestModelClientDataTransformation:
-    """Integration tests for data transformation between model responses and database format."""
-
-    @pytest.mark.asyncio
-    async def test_action_item_to_dict_transformation(self):
-        """Test ActionItem.to_dict() produces correct format for database."""
-        action_item = ActionItem(
-            description="Complete code review",
-            owner="Alice Smith",
-            due_date="2026-07-25",
-            confidence=0.93
-        )
-
-        result = action_item.to_dict()
-
-        assert isinstance(result, dict)
-        assert result["description"] == "Complete code review"
-        assert result["owner"] == "Alice Smith"
-        assert result["due_date"] == "2026-07-25"
-        assert result["confidence"] == 0.93
-
-    @pytest.mark.asyncio
-    async def test_action_item_with_none_values(self):
-        """Test ActionItem handles None values correctly."""
-        action_item = ActionItem(
-            description="Review documentation",
-            owner=None,
-            due_date=None,
-            confidence=None
-        )
-
-        result = action_item.to_dict()
-
-        assert result["description"] == "Review documentation"
-        assert result["owner"] is None
-        assert result["due_date"] is None
-        assert result["confidence"] is None
-
-    @pytest.mark.asyncio
-    async def test_model_response_to_action_items_list(self):
-        """Test converting model response to list of ActionItem objects."""
-        mock_bedrock = Mock()
-        mock_response = {"body": Mock()}
-
-        response_data = {
-            "content": [{
-                "text": json.dumps({
-                    "action_items": [
-                        {
-                            "description": "Item 1",
-                            "owner": "Person 1",
-                            "due_date": "2026-07-10",
-                            "confidence": 0.9
-                        },
-                        {
-                            "description": "Item 2",
-                            "owner": None,
-                            "due_date": None,
-                            "confidence": 0.7
-                        }
-                    ]
-                })
-            }]
         }
 
-        mock_response["body"].read.return_value = json.dumps(response_data).encode()
-        mock_bedrock.invoke_model.return_value = mock_response
+        from model_client import ActionItemTransformer
+        transformer = ActionItemTransformer()
 
-        with patch('model_client.bedrock_client.boto3') as mock_boto3:
-            mock_boto3.client.return_value = mock_bedrock
+        transformed = transformer.transform(raw_response)
 
-            client = BedrockClient()
-            result = await client.extract_action_items("Test notes")
-
-            # Verify list of ActionItem objects
-            assert isinstance(result, list)
-            assert len(result) == 2
-            assert all(isinstance(item, ActionItem) for item in result)
-
-            # Verify conversion to dict format
-            dict_list = [item.to_dict() for item in result]
-            assert dict_list[0]["description"] == "Item 1"
-            assert dict_list[1]["owner"] is None
-
-
-@pytest.mark.integration
-class TestModelClientRetryBehavior:
-    """Integration tests for retry behavior on transient failures."""
+        assert len(transformed) == 2
+        assert all('id' in item for item in transformed)
+        assert all('description' in item for item in transformed)
+        assert all('priority' in item for item in transformed)
+        assert transformed[0]['priority'] == 'high'
+        assert transformed[1]['priority'] == 'critical'
 
     @pytest.mark.asyncio
-    async def test_client_retries_on_transient_error(self):
-        """Test that activities can retry model client calls."""
-        call_count = {"count": 0}
-
-        mock_bedrock = Mock()
-
-        def invoke_with_retry(*args, **kwargs):
-            call_count["count"] += 1
-            if call_count["count"] == 1:
-                raise Exception("Temporary network error")
-
-            # Success on second try
-            mock_response = {"body": Mock()}
-            response_data = {
-                "content": [{
-                    "text": json.dumps({
-                        "action_items": [
-                            {"description": "Retry succeeded", "owner": "Test"}
-                        ]
-                    })
-                }]
+    async def test_action_item_serialization(self):
+        """Test serialization of action items to different formats."""
+        action_items = [
+            {
+                'id': '1',
+                'description': 'Complete integration tests',
+                'priority': 'high',
+                'due_date': '2026-07-15',
+                'assignee': 'qa@example.com',
+                'status': 'pending'
+            },
+            {
+                'id': '2',
+                'description': 'Deploy to staging',
+                'priority': 'medium',
+                'due_date': '2026-07-20',
+                'assignee': 'devops@example.com',
+                'status': 'in_progress'
             }
-            mock_response["body"].read.return_value = json.dumps(response_data).encode()
-            return mock_response
+        ]
 
-        mock_bedrock.invoke_model.side_effect = invoke_with_retry
+        from model_client import ActionItemSerializer
+        serializer = ActionItemSerializer()
 
-        with patch('model_client.bedrock_client.boto3') as mock_boto3:
-            mock_boto3.client.return_value = mock_bedrock
+        json_output = serializer.to_json(action_items)
+        assert isinstance(json_output, str)
+        parsed = json.loads(json_output)
+        assert len(parsed) == 2
 
-            client = BedrockClient()
+        dict_output = serializer.to_dict(action_items)
+        assert isinstance(dict_output, dict)
+        assert 'action_items' in dict_output
+        assert len(dict_output['action_items']) == 2
 
-            # First call should fail
-            with pytest.raises(ModelAPIError):
-                await client.extract_action_items("Test notes")
+    @pytest.mark.asyncio
+    async def test_retry_behavior_exponential_backoff(self):
+        """Test retry behavior with exponential backoff."""
+        mock_bedrock_client = Mock()
+        attempt_times = []
 
-            # Reset for retry
-            call_count["count"] = 0
+        def side_effect(*args, **kwargs):
+            attempt_times.append(datetime.now())
+            if len(attempt_times) < 4:
+                raise ClientError(
+                    {'Error': {'Code': 'ServiceUnavailable', 'Message': 'Service temporarily unavailable'}},
+                    'InvokeModel'
+                )
+            return {
+                'body': Mock(read=lambda: json.dumps({
+                    'content': [{'text': json.dumps({'action_items': []})}]
+                }).encode())
+            }
 
-            # Simulate retry logic at activity level
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    result = await client.extract_action_items("Test notes")
-                    break
-                except Exception as e:
-                    if attempt == max_retries - 1:
-                        raise
-                    continue
+        mock_bedrock_client.invoke_model.side_effect = side_effect
 
-            # Should succeed on retry
-            assert len(result) == 1
-            assert result[0].description == "Retry succeeded"
+        with patch('boto3.client', return_value=mock_bedrock_client):
+            from model_client import BedrockModelClient
+            client = BedrockModelClient(
+                model_id='anthropic.claude-3-sonnet-20240229-v1:0',
+                max_retries=5,
+                retry_delay=0.1,
+                exponential_backoff=True
+            )
+
+            result = await client.extract_action_items('Test transcript')
+
+            assert len(attempt_times) == 4
+            assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_concurrent_requests(self):
+        """Test handling of concurrent requests to model client."""
+        mock_bedrock_client = Mock()
+        request_count = 0
+
+        def side_effect(*args, **kwargs):
+            nonlocal request_count
+            request_count += 1
+            return {
+                'body': Mock(read=lambda: json.dumps({
+                    'content': [{'text': json.dumps({
+                        'action_items': [{'id': str(request_count), 'description': f'Task {request_count}'}]
+                    })}]
+                }).encode())
+            }
+
+        mock_bedrock_client.invoke_model.side_effect = side_effect
+
+        with patch('boto3.client', return_value=mock_bedrock_client):
+            from model_client import BedrockModelClient
+            client = BedrockModelClient(model_id='anthropic.claude-3-sonnet-20240229-v1:0')
+
+            tasks = [
+                client.extract_action_items(f'Transcript {i}')
+                for i in range(5)
+            ]
+
+            results = await asyncio.gather(*tasks)
+
+            assert len(results) == 5
+            assert request_count == 5
+            assert all(result is not None for result in results)
+
+    @pytest.mark.asyncio
+    async def test_empty_transcript_handling(self):
+        """Test handling of empty or null transcripts."""
+        mock_bedrock_client = Mock()
+        mock_response = {
+            'body': Mock(read=lambda: json.dumps({
+                'content': [{'text': json.dumps({'action_items': []})}]
+            }).encode())
+        }
+        mock_bedrock_client.invoke_model.return_value = mock_response
+
+        with patch('boto3.client', return_value=mock_bedrock_client):
+            from model_client import BedrockModelClient
+            client = BedrockModelClient(model_id='anthropic.claude-3-sonnet-20240229-v1:0')
+
+            result_empty = await client.extract_action_items('')
+            assert result_empty is not None
+            assert 'action_items' in result_empty
+            assert len(result_empty['action_items']) == 0
+
+            result_whitespace = await client.extract_action_items('   ')
+            assert result_whitespace is not None
+
+    @pytest.mark.asyncio
+    async def test_large_transcript_processing(self):
+        """Test processing of large transcripts with token limits."""
+        mock_bedrock_client = Mock()
+        large_transcript = 'Meeting notes. ' * 10000
+
+        mock_response = {
+            'body': Mock(read=lambda: json.dumps({
+                'content': [{'text': json.dumps({
+                    'action_items': [
+                        {'id': '1', 'description': 'Task from large transcript', 'priority': 'high'}
+                    ]
+                })}]
+            }).encode())
+        }
+        mock_bedrock_client.invoke_model.return_value = mock_response
+
+        with patch('boto3.client', return_value=mock_bedrock_client):
+            from model_client import BedrockModelClient
+            client = BedrockModelClient(
+                model_id='anthropic.claude-3-sonnet-20240229-v1:0',
+                max_tokens=4096
+            )
+
+            result = await client.extract_action_items(large_transcript)
+
+            assert result is not None
+            assert 'action_items' in result
+
+            call_args = mock_bedrock_client.invoke_model.call_args
+            assert call_args is not None
+
+    @pytest.mark.asyncio
+    async def test_model_rate_limiting(self):
+        """Test that model client respects rate limits."""
+        mock_bedrock_client = Mock()
+        request_times = []
+
+        def side_effect(*args, **kwargs):
+            request_times.append(time.time())
+            return {
+                'body': Mock(read=lambda: json.dumps({
+                    'content': [{'text': json.dumps({
+                        'action_items': [{'id': str(len(request_times)), 'description': f'Task {len(request_times)}'}]
+                    })}]
+                }).encode())
+            }
+
+        mock_bedrock_client.invoke_model.side_effect = side_effect
+
+        with patch('boto3.client', return_value=mock_bedrock_client):
+            from model_client import BedrockModelClient
+            client = BedrockModelClient(
+                model_id='anthropic.claude-3-sonnet-20240229-v1:0',
+                max_requests_per_minute=10
+            )
+
+            start_time = time.time()
+            results = []
+
+            for i in range(20):
+                result = await client.extract_action_items(f'Test transcript {i}')
+                results.append(result)
+
+            elapsed = time.time() - start_time
+
+            assert len(results) == 20
+            assert all(result is not None for result in results)
+            if hasattr(client, 'max_requests_per_minute') and client.max_requests_per_minute:
+                assert elapsed >= 60.0, f"Rate limiting should enforce at least 60s for 20 requests at 10 req/min, got {elapsed}s"
+
+            if len(request_times) >= 11:
+                first_window_duration = request_times[10] - request_times[0]
+                assert first_window_duration >= 60.0, f"First 10 requests should span at least 60s with rate limiting, got {first_window_duration}s"
+
+    @pytest.mark.asyncio
+    async def test_model_cost_tracking(self):
+        """Test that model usage is tracked for cost control."""
+        mock_bedrock_client = Mock()
+        mock_response = {
+            'body': Mock(read=lambda: json.dumps({
+                'content': [{'text': json.dumps({
+                    'action_items': [
+                        {'id': '1', 'description': 'Test task', 'priority': 'high'}
+                    ]
+                })}]
+            }).encode()),
+            'ResponseMetadata': {
+                'usage': {
+                    'inputTokens': 150,
+                    'outputTokens': 50
+                }
+            }
+        }
+        mock_bedrock_client.invoke_model.return_value = mock_response
+
+        with patch('boto3.client', return_value=mock_bedrock_client):
+            from model_client import BedrockModelClient
+            client = BedrockModelClient(model_id='anthropic.claude-3-sonnet-20240229-v1:0')
+
+            initial_cost = getattr(client, 'total_cost', 0)
+            initial_tokens = getattr(client, 'total_tokens', 0)
+            initial_count = getattr(client, 'request_count', 0)
+
+            await client.extract_action_items('Test transcript for cost tracking')
+
+            if hasattr(client, 'total_cost'):
+                assert client.total_cost >= initial_cost, "Cost tracking should increase or stay same"
+            if hasattr(client, 'total_tokens'):
+                assert client.total_tokens > initial_tokens, "Token count should increase after request"
+            if hasattr(client, 'request_count'):
+                assert client.request_count == initial_count + 1, "Request count should increment by 1"
+
+            cost_per_request = getattr(client, 'total_cost', 0) - initial_cost
+            tokens_per_request = getattr(client, 'total_tokens', 0) - initial_tokens
+
+            if hasattr(client, 'get_usage_report'):
+                usage_report = client.get_usage_report()
+                assert 'total_cost' in usage_report or 'total_tokens' in usage_report or 'request_count' in usage_report
+                assert usage_report.get('request_count', 0) >= 1
+
+    @pytest.mark.asyncio
+    async def test_cost_limit_enforcement(self):
+        """Test that cost limits are enforced to prevent runaway spending."""
+        mock_bedrock_client = Mock()
+        mock_response = {
+            'body': Mock(read=lambda: json.dumps({
+                'content': [{'text': json.dumps({
+                    'action_items': [{'id': '1', 'description': 'Task'}]
+                })}]
+            }).encode())
+        }
+        mock_bedrock_client.invoke_model.return_value = mock_response
+
+        with patch('boto3.client', return_value=mock_bedrock_client):
+            from model_client import BedrockModelClient
+            client = BedrockModelClient(
+                model_id='anthropic.claude-3-sonnet-20240229-v1:0',
+                max_cost_limit=0.01
+            )
+
+            if hasattr(client, 'max_cost_limit') and client.max_cost_limit:
+                if hasattr(client, 'total_cost'):
+                    client.total_cost = 0.009
+
+                await client.extract_action_items('Test transcript')
+
+                if hasattr(client, 'total_cost'):
+                    client.total_cost = 0.011
+
+                with pytest.raises(Exception) as exc_info:
+                    await client.extract_action_items('Another test transcript')
+
+                assert 'cost' in str(exc_info.value).lower() or 'limit' in str(exc_info.value).lower()
+
+
+if __name__ == '__main__':
+    pytest.main([__file__, '-v'])

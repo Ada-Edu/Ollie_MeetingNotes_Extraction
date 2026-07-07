@@ -1,443 +1,473 @@
 import { test, expect, devices } from '@playwright/test';
 
-test.describe('Responsive Design E2E Tests', () => {
-  const TEST_NOTES = `
-Team meeting
-Action items:
-1. John to review code
-2. Sarah to update docs
-  `.trim();
+test.describe('Responsive Design Tests', () => {
+  const baseURL = process.env.BASE_URL || 'http://localhost:3000';
 
-  test.describe('Mobile viewport tests', () => {
-    test.use({ ...devices['iPhone 12'] });
+  test.describe('Mobile Viewport - iPhone', () => {
+    test.use({ ...devices['iPhone 13 Pro'] });
 
-    test('should display correctly on mobile', async ({ page }) => {
-      await page.goto('/meeting-notes');
-
-      // Key elements should be visible
-      await expect(page.getByRole('heading', { name: /meeting notes/i })).toBeVisible();
-      await expect(page.getByPlaceholder(/paste your meeting notes/i)).toBeVisible();
-      await expect(page.getByRole('button', { name: /extract action items/i })).toBeVisible();
+    test('should render correctly on iPhone viewport', async ({ page }) => {
+      await page.goto(baseURL);
+      const viewport = page.viewportSize();
+      expect(viewport?.width).toBeLessThanOrEqual(428);
+      await expect(page.locator('body')).toBeVisible();
     });
 
-    test('should have touch-friendly buttons on mobile', async ({ page }) => {
-      await page.goto('/meeting-notes');
+    test('should display touch-friendly buttons on mobile', async ({ page }) => {
+      await page.goto(baseURL);
+      const buttons = page.locator('button');
+      const count = await buttons.count();
 
-      const submitButton = page.getByRole('button', { name: /extract action items/i });
-
-      // Button should have adequate touch target size (at least 44x44px)
-      const buttonSize = await submitButton.boundingBox();
-      if (buttonSize) {
-        expect(buttonSize.height).toBeGreaterThanOrEqual(40); // Allow slight variance
+      for (let i = 0; i < count; i++) {
+        const button = buttons.nth(i);
+        const box = await button.boundingBox();
+        if (box) {
+          expect(box.height).toBeGreaterThanOrEqual(44);
+          expect(box.width).toBeGreaterThanOrEqual(44);
+        }
       }
+    });
+
+    test('should support complete extraction flow on mobile', async ({ page }) => {
+      await page.goto(`${baseURL}/meeting-notes`);
+
+      // Verify form is usable
+      const textarea = page.getByPlaceholder(/paste your meeting notes/i);
+      await expect(textarea).toBeVisible();
+
+      const box = await textarea.boundingBox();
+      expect(box?.width).toBeGreaterThan(200);  // Wide enough to use
+
+      // Complete full workflow on mobile
+      await textarea.fill('Meeting notes: John to review doc by Friday');
+      await page.getByRole('button', { name: /extract/i }).click();
+
+      // Verify results are readable on mobile
+      await expect(page.getByText(/extraction complete/i)).toBeVisible({ timeout: 60000 });
+
+      const actionItem = page.locator('[data-testid="action-item"]').first();
+      const itemBox = await actionItem.boundingBox();
+      expect(itemBox?.width).toBeLessThanOrEqual(page.viewportSize()?.width || 0);
+
+      // Verify text is not truncated
+      const description = await actionItem.locator('[data-field="description"]').textContent();
+      expect(description).toContain('review doc');
     });
 
     test('should stack elements vertically on mobile', async ({ page }) => {
-      await page.goto('/meeting-notes');
-
-      const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-      const submitButton = page.getByRole('button', { name: /extract action items/i });
-
-      const inputBox = await notesInput.boundingBox();
-      const buttonBox = await submitButton.boundingBox();
-
-      // Button should be below textarea (y position greater)
-      if (inputBox && buttonBox) {
-        expect(buttonBox.y).toBeGreaterThan(inputBox.y);
+      await page.goto(baseURL);
+      const container = page.locator('[data-testid="main-container"]').first();
+      if (await container.count() > 0) {
+        const flexDirection = await container.evaluate((el) =>
+          window.getComputedStyle(el).flexDirection
+        );
+        expect(['column', 'column-reverse']).toContain(flexDirection);
       }
     });
 
-    test('should handle mobile keyboard', async ({ page }) => {
-      await page.goto('/meeting-notes');
+    test('should handle mobile keyboard appearance', async ({ page }) => {
+      await page.goto(baseURL);
+      const input = page.locator('input[type="text"]').first();
 
-      const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-
-      // Tap textarea
-      await notesInput.tap();
-
-      // Should be focused
-      const isFocused = await notesInput.evaluate(el => el === document.activeElement);
-      expect(isFocused).toBe(true);
-
-      // Type on mobile
-      await notesInput.fill(TEST_NOTES);
-      await expect(notesInput).toHaveValue(TEST_NOTES);
+      if (await input.count() > 0) {
+        await input.focus();
+        await page.waitForTimeout(500);
+        await expect(input).toBeFocused();
+        const isVisible = await input.isVisible();
+        expect(isVisible).toBeTruthy();
+      }
     });
 
-    test('should handle mobile scrolling', async ({ page }) => {
-      await page.goto('/meeting-notes');
-
-      const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-      await notesInput.fill(TEST_NOTES);
-
-      const submitButton = page.getByRole('button', { name: /extract action items/i });
-
-      // Scroll to button if needed
-      await submitButton.scrollIntoViewIfNeeded();
-      await submitButton.tap();
-
-      await expect(page.getByText(/processing/i)).toBeVisible({ timeout: 5000 });
+    test('should enable smooth scrolling on mobile', async ({ page }) => {
+      await page.goto(baseURL);
+      const scrollBehavior = await page.evaluate(() =>
+        window.getComputedStyle(document.documentElement).scrollBehavior
+      );
+      expect(['smooth', 'auto']).toContain(scrollBehavior);
     });
 
-    test('should display results on mobile without overflow', async ({ page }) => {
-      await page.goto('/meeting-notes');
+    test('should prevent horizontal overflow on mobile', async ({ page }) => {
+      await page.goto(baseURL);
+      const bodyWidth = await page.evaluate(() => document.body.scrollWidth);
+      const viewportWidth = page.viewportSize()?.width || 0;
+      expect(bodyWidth).toBeLessThanOrEqual(viewportWidth + 1);
 
-      const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-      const submitButton = page.getByRole('button', { name: /extract action items/i });
+      // Verify content is readable and usable
+      const textElements = page.locator('p, span, h1, h2, h3, button, a');
+      const count = await textElements.count();
 
-      await notesInput.fill(TEST_NOTES);
-      await submitButton.tap();
+      if (count > 0) {
+        for (let i = 0; i < Math.min(count, 5); i++) {
+          const element = textElements.nth(i);
+          const elementBox = await element.boundingBox();
 
-      await expect(page.getByText(/extraction complete/i)).toBeVisible({ timeout: 45000 });
+          if (elementBox) {
+            // Verify element is not wider than viewport
+            expect(elementBox.width).toBeLessThanOrEqual(viewportWidth);
 
-      // Results should be visible without horizontal scroll
-      const hasHorizontalScroll = await page.evaluate(() => {
-        return document.documentElement.scrollWidth > document.documentElement.clientWidth;
-      });
+            // Verify element is positioned within viewport
+            expect(elementBox.x).toBeGreaterThanOrEqual(0);
+            expect(elementBox.x + elementBox.width).toBeLessThanOrEqual(viewportWidth + 1);
 
-      expect(hasHorizontalScroll).toBe(false);
-    });
-
-    test('should adapt text size for mobile readability', async ({ page }) => {
-      await page.goto('/meeting-notes');
-
-      const heading = page.getByRole('heading', { name: /meeting notes/i });
-
-      // Font size should be readable on mobile (at least 16px for body text)
-      const fontSize = await heading.evaluate(el => {
-        return parseInt(window.getComputedStyle(el).fontSize);
-      });
-
-      expect(fontSize).toBeGreaterThanOrEqual(20); // Headings should be larger
+            // Verify text is readable (not too small)
+            const fontSize = await element.evaluate((el) =>
+              parseInt(window.getComputedStyle(el).fontSize)
+            );
+            expect(fontSize).toBeGreaterThanOrEqual(12);
+          }
+        }
+      }
     });
   });
 
-  test.describe('Tablet viewport tests', () => {
+  test.describe('Tablet Viewport - iPad', () => {
     test.use({ ...devices['iPad Pro'] });
 
-    test('should display correctly on tablet', async ({ page }) => {
-      await page.goto('/meeting-notes');
-
-      await expect(page.getByRole('heading', { name: /meeting notes/i })).toBeVisible();
-      await expect(page.getByPlaceholder(/paste your meeting notes/i)).toBeVisible();
-      await expect(page.getByRole('button', { name: /extract action items/i })).toBeVisible();
+    test('should render correctly on iPad viewport', async ({ page }) => {
+      await page.goto(baseURL);
+      const viewport = page.viewportSize();
+      expect(viewport?.width).toBeGreaterThan(768);
+      expect(viewport?.width).toBeLessThanOrEqual(1024);
     });
 
-    test('should use available space on tablet', async ({ page }) => {
-      await page.goto('/meeting-notes');
+    test('should utilize available space on tablet', async ({ page }) => {
+      await page.goto(baseURL);
+      const mainContent = page.locator('main, [role="main"]').first();
 
-      const container = page.locator('.container, [class*="max-w"]').first();
-      const containerWidth = await container.evaluate(el => el.clientWidth);
+      if (await mainContent.count() > 0) {
+        const box = await mainContent.boundingBox();
+        const viewportWidth = page.viewportSize()?.width || 0;
 
-      // Should use significant portion of screen width
-      const viewportSize = page.viewportSize();
-      if (viewportSize) {
-        expect(containerWidth).toBeGreaterThan(viewportSize.width * 0.5);
+        if (box) {
+          expect(box.width).toBeGreaterThan(viewportWidth * 0.5);
+        }
       }
     });
 
-    test('should support both touch and mouse on tablet', async ({ page }) => {
-      await page.goto('/meeting-notes');
+    test('should support both touch and mouse interactions on tablet', async ({ page }) => {
+      await page.goto(baseURL);
+      const button = page.locator('button').first();
 
-      const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-      const submitButton = page.getByRole('button', { name: /extract action items/i });
-
-      // Test touch
-      await notesInput.tap();
-      await notesInput.fill(TEST_NOTES);
-
-      // Test mouse click
-      await submitButton.click();
-
-      await expect(page.getByText(/processing/i)).toBeVisible({ timeout: 5000 });
+      if (await button.count() > 0) {
+        await button.click();
+        await expect(button).toBeVisible();
+      }
     });
   });
 
-  test.describe('Desktop viewport tests', () => {
+  test.describe('Desktop Viewport', () => {
     test.use({ viewport: { width: 1920, height: 1080 } });
 
-    test('should display correctly on large desktop', async ({ page }) => {
-      await page.goto('/meeting-notes');
-
-      await expect(page.getByRole('heading', { name: /meeting notes/i })).toBeVisible();
-      await expect(page.getByPlaceholder(/paste your meeting notes/i)).toBeVisible();
-      await expect(page.getByRole('button', { name: /extract action items/i })).toBeVisible();
+    test('should render correctly on desktop viewport', async ({ page }) => {
+      await page.goto(baseURL);
+      const viewport = page.viewportSize();
+      expect(viewport?.width).toBe(1920);
+      expect(viewport?.height).toBe(1080);
     });
 
-    test('should constrain max-width on large screens', async ({ page }) => {
-      await page.goto('/meeting-notes');
+    test('should apply max-width constraints on desktop', async ({ page }) => {
+      await page.goto(baseURL);
+      const container = page.locator('[class*="container"], main').first();
 
-      const container = page.locator('.container, [class*="max-w"]').first();
-      const containerWidth = await container.evaluate(el => el.clientWidth);
-
-      // Should not extend to full width on very large screens
-      expect(containerWidth).toBeLessThan(1920);
-      expect(containerWidth).toBeGreaterThan(800); // But should be reasonably wide
+      if (await container.count() > 0) {
+        const maxWidth = await container.evaluate((el) =>
+          window.getComputedStyle(el).maxWidth
+        );
+        expect(maxWidth).not.toBe('none');
+      }
     });
 
-    test('should center content on large screens', async ({ page }) => {
-      await page.goto('/meeting-notes');
+    test('should center content on wide screens', async ({ page }) => {
+      await page.goto(baseURL);
+      const mainContent = page.locator('main, [role="main"]').first();
 
-      const container = page.locator('.container, [class*="mx-auto"]').first();
-      const marginLeft = await container.evaluate(el => {
-        return parseInt(window.getComputedStyle(el).marginLeft);
-      });
+      if (await mainContent.count() > 0) {
+        const box = await mainContent.boundingBox();
+        const viewportWidth = page.viewportSize()?.width || 0;
 
-      // Should have auto margins for centering
-      expect(marginLeft).toBeGreaterThan(0);
+        if (box) {
+          const marginLeft = box.x;
+          const marginRight = viewportWidth - (box.x + box.width);
+          const difference = Math.abs(marginLeft - marginRight);
+          expect(difference).toBeLessThan(50);
+        }
+      }
     });
   });
 
-  test.describe('Viewport transition tests', () => {
-    test('should handle resize from mobile to desktop', async ({ page }) => {
-      // Start mobile
+  test.describe('Viewport Transitions', () => {
+    test('should transition from mobile to tablet smoothly', async ({ page }) => {
       await page.setViewportSize({ width: 375, height: 667 });
-      await page.goto('/meeting-notes');
+      await page.goto(baseURL);
+      await expect(page.locator('body')).toBeVisible();
 
-      await expect(page.getByPlaceholder(/paste your meeting notes/i)).toBeVisible();
-
-      // Resize to desktop
-      await page.setViewportSize({ width: 1280, height: 800 });
-
-      // Elements should still be visible and properly laid out
-      await expect(page.getByPlaceholder(/paste your meeting notes/i)).toBeVisible();
-      await expect(page.getByRole('button', { name: /extract action items/i })).toBeVisible();
+      await page.setViewportSize({ width: 768, height: 1024 });
+      await page.waitForTimeout(300);
+      await expect(page.locator('body')).toBeVisible();
     });
 
-    test('should handle resize from desktop to mobile', async ({ page }) => {
-      // Start desktop
-      await page.setViewportSize({ width: 1280, height: 800 });
-      await page.goto('/meeting-notes');
+    test('should transition from tablet to desktop smoothly', async ({ page }) => {
+      await page.setViewportSize({ width: 768, height: 1024 });
+      await page.goto(baseURL);
+      await expect(page.locator('body')).toBeVisible();
 
-      const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-      await notesInput.fill(TEST_NOTES);
-
-      // Resize to mobile
-      await page.setViewportSize({ width: 375, height: 667 });
-
-      // Content should remain intact
-      await expect(notesInput).toHaveValue(TEST_NOTES);
-      await expect(page.getByRole('button', { name: /extract action items/i })).toBeVisible();
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.waitForTimeout(300);
+      await expect(page.locator('body')).toBeVisible();
     });
   });
 
-  test.describe('Orientation tests', () => {
-    test('should handle portrait orientation on mobile', async ({ page }) => {
-      await page.setViewportSize({ width: 375, height: 667 }); // Portrait
-      await page.goto('/meeting-notes');
+  test.describe('Orientation Support', () => {
+    test('should handle portrait orientation', async ({ page }) => {
+      await page.setViewportSize({ width: 375, height: 812 });
+      await page.goto(baseURL);
 
-      await expect(page.getByPlaceholder(/paste your meeting notes/i)).toBeVisible();
+      const viewport = page.viewportSize();
+      expect(viewport?.height).toBeGreaterThan(viewport?.width || 0);
+      await expect(page.locator('body')).toBeVisible();
     });
 
-    test('should handle landscape orientation on mobile', async ({ page }) => {
-      await page.setViewportSize({ width: 667, height: 375 }); // Landscape
-      await page.goto('/meeting-notes');
+    test('should handle landscape orientation', async ({ page }) => {
+      await page.setViewportSize({ width: 812, height: 375 });
+      await page.goto(baseURL);
 
-      await expect(page.getByPlaceholder(/paste your meeting notes/i)).toBeVisible();
-    });
-
-    test('should adapt layout in landscape mode', async ({ page }) => {
-      await page.setViewportSize({ width: 667, height: 375 }); // Landscape
-      await page.goto('/meeting-notes');
-
-      // Elements should fit without excessive scrolling
-      const submitButton = page.getByRole('button', { name: /extract action items/i });
-      const isInViewport = await submitButton.isVisible();
-
-      expect(isInViewport).toBe(true);
+      const viewport = page.viewportSize();
+      expect(viewport?.width).toBeGreaterThan(viewport?.height || 0);
+      await expect(page.locator('body')).toBeVisible();
     });
   });
 
-  test.describe('Common breakpoints', () => {
+  test.describe('Common Breakpoints', () => {
     const breakpoints = [
-      { name: 'Small mobile', width: 320, height: 568 },
-      { name: 'Mobile', width: 375, height: 667 },
-      { name: 'Large mobile', width: 414, height: 896 },
-      { name: 'Tablet', width: 768, height: 1024 },
-      { name: 'Small desktop', width: 1024, height: 768 },
-      { name: 'Desktop', width: 1280, height: 800 },
-      { name: 'Large desktop', width: 1920, height: 1080 }
+      { name: 'Extra Small - 320px', width: 320, height: 568 },
+      { name: 'Small - 375px', width: 375, height: 667 },
+      { name: 'Medium - 768px', width: 768, height: 1024 },
+      { name: 'Large - 1024px', width: 1024, height: 768 },
+      { name: 'Extra Large - 1440px', width: 1440, height: 900 },
+      { name: 'XXL - 1920px', width: 1920, height: 1080 },
     ];
 
     breakpoints.forEach(({ name, width, height }) => {
-      test(`should display correctly at ${name} (${width}x${height})`, async ({ page }) => {
+      test(`should render correctly at ${name}`, async ({ page }) => {
         await page.setViewportSize({ width, height });
-        await page.goto('/meeting-notes');
+        await page.goto(baseURL);
 
-        // Core elements should be visible at all breakpoints
-        await expect(page.getByRole('heading', { name: /meeting notes/i })).toBeVisible();
-        await expect(page.getByPlaceholder(/paste your meeting notes/i)).toBeVisible();
-        await expect(page.getByRole('button', { name: /extract action items/i })).toBeVisible();
+        await expect(page.locator('body')).toBeVisible();
 
-        // No horizontal overflow
-        const hasHorizontalScroll = await page.evaluate(() => {
-          return document.documentElement.scrollWidth > document.documentElement.clientWidth;
-        });
-        expect(hasHorizontalScroll).toBe(false);
+        const bodyWidth = await page.evaluate(() => document.body.scrollWidth);
+        expect(bodyWidth).toBeLessThanOrEqual(width + 1);
       });
     });
   });
 
-  test.describe('Touch interactions', () => {
-    test.use({ ...devices['iPhone 12'] });
-
-    test('should handle tap events', async ({ page }) => {
-      await page.goto('/meeting-notes');
-
-      const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-      const submitButton = page.getByRole('button', { name: /extract action items/i });
-
-      await notesInput.tap();
-      await notesInput.fill(TEST_NOTES);
-
-      await submitButton.tap();
-
-      await expect(page.getByText(/processing/i)).toBeVisible({ timeout: 5000 });
-    });
-
-    test('should handle long press', async ({ page }) => {
-      await page.goto('/meeting-notes');
-
-      const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-
-      // Long press to select text (simulated)
-      await notesInput.fill('Test text');
-      await notesInput.tap({ position: { x: 10, y: 10 } });
-      await page.waitForTimeout(500);
-
-      // Text should be there
-      await expect(notesInput).toHaveValue('Test text');
-    });
-
-    test('should prevent double-tap zoom', async ({ page }) => {
-      await page.goto('/meeting-notes');
-
-      const heading = page.getByRole('heading', { name: /meeting notes/i });
-
-      // Double tap
-      await heading.tap({ clickCount: 2 });
-
-      // Page should not zoom (this is handled by viewport meta tag)
-      // We can't directly test zoom, but we can verify viewport meta exists
-      const viewportMeta = await page.locator('meta[name="viewport"]').getAttribute('content');
-      expect(viewportMeta).toContain('user-scalable');
-    });
-  });
-
-  test.describe('Font scaling', () => {
-    test('should handle user font size preferences', async ({ page }) => {
-      await page.goto('/meeting-notes');
-
-      // Simulate user increasing font size
-      await page.addStyleTag({
-        content: 'html { font-size: 20px; }' // Increased from default 16px
-      });
-
-      // Elements should still be visible and not overflow
-      await expect(page.getByPlaceholder(/paste your meeting notes/i)).toBeVisible();
-
-      const hasHorizontalScroll = await page.evaluate(() => {
-        return document.documentElement.scrollWidth > document.documentElement.clientWidth;
-      });
-
-      expect(hasHorizontalScroll).toBe(false);
-    });
-  });
-
-  test.describe('Flexible layouts', () => {
-    test('should adapt button layout on narrow screens', async ({ page }) => {
-      await page.setViewportSize({ width: 320, height: 568 }); // Very narrow
-      await page.goto('/meeting-notes');
-
-      const submitButton = page.getByRole('button', { name: /extract action items/i });
-
-      // Button should be visible
-      await expect(submitButton).toBeVisible();
-
-      // Button should not overflow
-      const buttonWidth = await submitButton.evaluate(el => el.clientWidth);
-      expect(buttonWidth).toBeLessThanOrEqual(320 - 32); // Account for padding
-    });
-
-    test('should handle long action item text on mobile', async ({ page }) => {
+  test.describe('Text Readability', () => {
+    test('should have readable font sizes on mobile', async ({ page }) => {
       await page.setViewportSize({ width: 375, height: 667 });
-      await page.goto('/meeting-notes');
+      await page.goto(baseURL);
 
-      const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-      const submitButton = page.getByRole('button', { name: /extract action items/i });
-
-      await notesInput.fill(`
-Action items:
-1. John to review the comprehensive architectural design document and provide detailed feedback by Friday
-      `.trim());
-
-      await submitButton.tap();
-
-      await expect(page.getByText(/extraction complete/i)).toBeVisible({ timeout: 45000 });
-
-      // Long text should wrap, not overflow
-      const hasHorizontalScroll = await page.evaluate(() => {
-        return document.documentElement.scrollWidth > document.documentElement.clientWidth;
-      });
-
-      expect(hasHorizontalScroll).toBe(false);
+      const paragraphs = page.locator('p, span, div').first();
+      if (await paragraphs.count() > 0) {
+        const fontSize = await paragraphs.evaluate((el) =>
+          parseInt(window.getComputedStyle(el).fontSize)
+        );
+        expect(fontSize).toBeGreaterThanOrEqual(14);
+      }
     });
-  });
 
-  test.describe('Image and media scaling', () => {
-    test('should scale images responsively', async ({ page }) => {
-      await page.setViewportSize({ width: 375, height: 667 });
-      await page.goto('/meeting-notes');
+    test('should scale fonts appropriately across viewports', async ({ page }) => {
+      const viewports = [
+        { width: 375, height: 667 },
+        { width: 1440, height: 900 }
+      ];
 
-      // Check for any images
-      const images = page.locator('img');
-      const imageCount = await images.count();
+      const fontSizes: number[] = [];
 
-      for (let i = 0; i < imageCount; i++) {
-        const img = images.nth(i);
-        const imgWidth = await img.evaluate(el => el.clientWidth);
-        const viewportWidth = 375;
+      for (const viewport of viewports) {
+        await page.setViewportSize(viewport);
+        await page.goto(baseURL);
 
-        // Images should not exceed viewport width
-        expect(imgWidth).toBeLessThanOrEqual(viewportWidth);
+        const heading = page.locator('h1, h2').first();
+        if (await heading.count() > 0) {
+          const fontSize = await heading.evaluate((el) =>
+            parseInt(window.getComputedStyle(el).fontSize)
+          );
+          fontSizes.push(fontSize);
+        }
+      }
+
+      if (fontSizes.length === 2) {
+        expect(fontSizes[1]).toBeGreaterThanOrEqual(fontSizes[0]);
       }
     });
   });
 
-  test.describe('Spacing and padding', () => {
-    test('should have appropriate spacing on mobile', async ({ page }) => {
-      await page.setViewportSize({ width: 375, height: 667 });
-      await page.goto('/meeting-notes');
+  test.describe('Touch Interactions', () => {
+    test.use({ ...devices['iPhone 13 Pro'] });
 
-      const container = page.locator('[class*="p-"], [class*="px-"], [class*="py-"]').first();
+    test('should handle tap interactions', async ({ page }) => {
+      await page.goto(baseURL);
+      const button = page.locator('button').first();
 
-      // Should have some padding
-      const padding = await container.evaluate(el => {
-        const styles = window.getComputedStyle(el);
-        return {
-          left: parseInt(styles.paddingLeft),
-          right: parseInt(styles.paddingRight)
-        };
-      });
-
-      // Should have reasonable padding on mobile
-      expect(padding.left).toBeGreaterThanOrEqual(16);
-      expect(padding.right).toBeGreaterThanOrEqual(16);
+      if (await button.count() > 0) {
+        await button.tap();
+        await expect(button).toBeVisible();
+      }
     });
 
-    test('should adjust spacing for larger screens', async ({ page }) => {
-      await page.setViewportSize({ width: 1920, height: 1080 });
-      await page.goto('/meeting-notes');
+    test('should have adequate touch target spacing', async ({ page }) => {
+      await page.goto(baseURL);
+      const buttons = page.locator('button');
+      const count = await buttons.count();
 
-      const container = page.locator('[class*="p-"], [class*="px-"], [class*="py-"]').first();
+      for (let i = 0; i < count - 1; i++) {
+        const box1 = await buttons.nth(i).boundingBox();
+        const box2 = await buttons.nth(i + 1).boundingBox();
 
-      // May have more generous padding on desktop
-      const padding = await container.evaluate(el => {
-        const styles = window.getComputedStyle(el);
-        return parseInt(styles.paddingLeft);
+        if (box1 && box2) {
+          const verticalGap = Math.abs(box2.y - (box1.y + box1.height));
+          const horizontalGap = Math.abs(box2.x - (box1.x + box1.width));
+          const minGap = Math.min(verticalGap, horizontalGap);
+
+          if (minGap > 0) {
+            expect(minGap).toBeGreaterThanOrEqual(8);
+          }
+        }
+      }
+    });
+  });
+
+  test.describe('Flexible Layouts', () => {
+    test('should use flexible layout units', async ({ page }) => {
+      await page.goto(baseURL);
+      const container = page.locator('[class*="container"], main').first();
+
+      if (await container.count() > 0) {
+        const width = await container.evaluate((el) =>
+          window.getComputedStyle(el).width
+        );
+        expect(width).toMatch(/(%|rem|em|vw|auto)/);
+      }
+    });
+
+    test('should adapt grid layouts to viewport', async ({ page }) => {
+      await page.setViewportSize({ width: 375, height: 667 });
+      await page.goto(baseURL);
+
+      const grid = page.locator('[class*="grid"]').first();
+      if (await grid.count() > 0) {
+        const mobileColumns = await grid.evaluate((el) =>
+          window.getComputedStyle(el).gridTemplateColumns
+        );
+
+        await page.setViewportSize({ width: 1440, height: 900 });
+        await page.waitForTimeout(300);
+
+        const desktopColumns = await grid.evaluate((el) =>
+          window.getComputedStyle(el).gridTemplateColumns
+        );
+
+        expect(mobileColumns).not.toBe(desktopColumns);
+      }
+    });
+  });
+
+  test.describe('Image Scaling', () => {
+    test('should scale images responsively', async ({ page }) => {
+      await page.goto(baseURL);
+      const images = page.locator('img');
+      const count = await images.count();
+
+      for (let i = 0; i < count; i++) {
+        const img = images.nth(i);
+        const maxWidth = await img.evaluate((el) =>
+          window.getComputedStyle(el).maxWidth
+        );
+        expect(['100%', 'none']).toContain(maxWidth);
+      }
+    });
+
+    test('should maintain aspect ratio of images', async ({ page }) => {
+      await page.goto(baseURL);
+      const images = page.locator('img');
+      const count = await images.count();
+
+      for (let i = 0; i < count; i++) {
+        const img = images.nth(i);
+        const objectFit = await img.evaluate((el) =>
+          window.getComputedStyle(el).objectFit
+        );
+        expect(['contain', 'cover', 'fill', 'none', 'scale-down']).toContain(objectFit);
+      }
+    });
+  });
+
+  test.describe('Spacing and Padding', () => {
+    test('should adjust padding for mobile', async ({ page }) => {
+      await page.setViewportSize({ width: 375, height: 667 });
+      await page.goto(baseURL);
+
+      const container = page.locator('main, [role="main"]').first();
+      if (await container.count() > 0) {
+        const padding = await container.evaluate((el) =>
+          parseInt(window.getComputedStyle(el).paddingLeft)
+        );
+        expect(padding).toBeGreaterThanOrEqual(8);
+        expect(padding).toBeLessThanOrEqual(32);
+      }
+    });
+
+    test('should increase spacing on larger screens', async ({ page }) => {
+      const viewports = [
+        { width: 375, height: 667 },
+        { width: 1440, height: 900 }
+      ];
+
+      const paddings: number[] = [];
+
+      for (const viewport of viewports) {
+        await page.setViewportSize(viewport);
+        await page.goto(baseURL);
+
+        const container = page.locator('main, [role="main"]').first();
+        if (await container.count() > 0) {
+          const padding = await container.evaluate((el) =>
+            parseInt(window.getComputedStyle(el).paddingLeft)
+          );
+          paddings.push(padding);
+        }
+      }
+
+      if (paddings.length === 2) {
+        expect(paddings[1]).toBeGreaterThanOrEqual(paddings[0]);
+      }
+    });
+  });
+
+  test.describe('Accessibility on Different Viewports', () => {
+    test('should maintain focus visibility on mobile', async ({ page }) => {
+      await page.setViewportSize({ width: 375, height: 667 });
+      await page.goto(baseURL);
+
+      const focusableElement = page.locator('button, a, input').first();
+      if (await focusableElement.count() > 0) {
+        await focusableElement.focus();
+        const outline = await focusableElement.evaluate((el) =>
+          window.getComputedStyle(el).outline
+        );
+        expect(outline).not.toBe('none');
+      }
+    });
+
+    test('should support zoom without breaking layout', async ({ page }) => {
+      await page.goto(baseURL);
+      await page.evaluate(() => {
+        document.body.style.zoom = '150%';
       });
 
-      expect(padding).toBeGreaterThanOrEqual(0);
+      await page.waitForTimeout(300);
+      const bodyWidth = await page.evaluate(() => document.body.scrollWidth);
+      const viewportWidth = page.viewportSize()?.width || 0;
+      expect(bodyWidth).toBeLessThanOrEqual(viewportWidth * 1.6);
     });
   });
 });

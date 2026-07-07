@@ -1,23 +1,17 @@
-"""
-Integration tests for Temporal workflow execution end-to-end.
-Tests ExtractMeetingActionItemsWorkflow with real activities and mocked external services.
-
-@group integration
-"""
-
-import sys
-from pathlib import Path
-
-# Add src to path
-src_path = Path(__file__).parent.parent.parent / "src"
-sys.path.insert(0, str(src_path))
-
 import pytest
-from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Worker
+import asyncio
 from datetime import timedelta
 from unittest.mock import AsyncMock, Mock, patch
-import uuid
+from temporalio.client import Client, WorkflowFailureError
+from temporalio.common import RetryPolicy
+from temporalio.exceptions import TimeoutError, ApplicationError
+from temporalio.testing import WorkflowEnvironment
+from temporalio.worker import Worker
+import sys
+import os
+
+# Add src to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 from workflows.meeting_notes_extraction import ExtractMeetingActionItemsWorkflow
 from activities.meeting_notes import (
@@ -28,422 +22,603 @@ from activities.meeting_notes import (
 )
 
 
-@pytest.mark.integration
 class TestTemporalWorkflowIntegration:
-    """Integration tests for Temporal workflow with activities."""
+    """Integration tests for Temporal workflow execution."""
+
+    @pytest.fixture
+    async def temporal_client(self):
+        """Create a test Temporal client."""
+        async with await WorkflowEnvironment.start_time_skipping() as env:
+            yield env.client
+
+    @pytest.fixture
+    async def workflow_worker(self, temporal_client):
+        """Create a worker for testing workflows."""
+        worker = Worker(
+            temporal_client,
+            task_queue="test-task-queue",
+            workflows=[ExtractMeetingActionItemsWorkflow],
+            activities=[
+                validate_meeting_notes_input,
+                call_model_for_action_item_extraction,
+                persist_extraction_results,
+                record_extraction_failure
+            ],
+        )
+        async with worker:
+            yield worker
 
     @pytest.mark.asyncio
-    async def test_complete_workflow_execution_success(self):
-        """Test complete workflow from validation to persistence."""
-        async with await WorkflowEnvironment.start_time_skipping() as env:
-            # Mock model client
-            mock_model_client = Mock()
-            mock_model_client.get_provider_name.return_value = "azure"
-            mock_model_client.get_model_name.return_value = "gpt-4"
+    async def test_complete_workflow_execution_success(self, temporal_client, workflow_worker):
+        """Test successful completion of entire workflow execution."""
+        workflow_id = "test-workflow-success"
 
-            mock_action_item = Mock()
-            mock_action_item.to_dict.return_value = {
-                "description": "Follow up with stakeholders",
-                "owner": "John Smith",
-                "due_date": "2026-07-15",
+        test_notes = "Team meeting notes: John will send the report by Friday. Sarah will schedule follow-up meeting."
+
+        # Mock only external dependencies (model and database)
+        with patch("activities.meeting_notes.get_model_client") as mock_model_client, \
+             patch("activities.meeting_notes.get_supabase_client") as mock_supabase:
+
+            # Mock model client
+            mock_client_instance = AsyncMock()
+            mock_client_instance.get_provider_name.return_value = "openai"
+            mock_client_instance.get_model_name.return_value = "gpt-4"
+            mock_action_item_1 = Mock()
+            mock_action_item_1.to_dict.return_value = {
+                "description": "Send report",
+                "owner": "John",
+                "due_date": "Friday",
+                "confidence": 0.95
+            }
+            mock_action_item_2 = Mock()
+            mock_action_item_2.to_dict.return_value = {
+                "description": "Schedule follow-up meeting",
+                "owner": "Sarah",
+                "due_date": None,
+                "confidence": 0.90
+            }
+            mock_client_instance.extract_action_items.return_value = [
+                mock_action_item_1,
+                mock_action_item_2
+            ]
+            mock_model_client.return_value = mock_client_instance
+
+            # Mock supabase client
+            mock_supabase_instance = AsyncMock()
+            mock_supabase_instance._request.side_effect = [
+                [],  # No existing runs
+                [{"id": "extraction-run-123"}],  # Created extraction run
+                None,  # Created action item 1
+                None   # Created action item 2
+            ]
+            mock_supabase.return_value = mock_supabase_instance
+
+            # Execute workflow
+            result = await temporal_client.execute_workflow(
+                ExtractMeetingActionItemsWorkflow.run,
+                args=["meeting-123", test_notes],
+                id=workflow_id,
+                task_queue="test-task-queue",
+            )
+
+            # Verify result structure
+            assert result["status"] == "completed"
+            assert result["extraction_run_id"] == "extraction-run-123"
+            assert result["action_items_count"] == 2
+            assert result["model_provider"] == "openai"
+            assert result["model_name"] == "gpt-4"
+
+            # Verify model was called with correct notes
+            mock_client_instance.extract_action_items.assert_called_once_with(test_notes)
+
+            # Verify database interactions
+            assert mock_supabase_instance._request.call_count == 4
+
+    @pytest.mark.asyncio
+    async def test_validation_failures(self, temporal_client, workflow_worker):
+        """Test workflow handling of validation failures."""
+        workflow_id = "test-workflow-validation-failure"
+
+        # Test with empty notes - should fail validation
+        empty_notes = ""
+
+        with patch("activities.meeting_notes.get_supabase_client") as mock_supabase:
+            # Mock supabase for failure recording
+            mock_supabase_instance = AsyncMock()
+            mock_supabase_instance._request.side_effect = [
+                [],  # No existing runs
+                [{"id": "extraction-run-failed-123"}]  # Created failure record
+            ]
+            mock_supabase.return_value = mock_supabase_instance
+
+            # Execute workflow - it should handle validation error gracefully
+            result = await temporal_client.execute_workflow(
+                ExtractMeetingActionItemsWorkflow.run,
+                args=["meeting-456", empty_notes],
+                id=workflow_id,
+                task_queue="test-task-queue",
+            )
+
+            # Workflow should return failed status, not raise exception
+            assert result["status"] == "failed"
+            assert result["extraction_run_id"] == "extraction-run-failed-123"
+            assert "empty" in result["error"].lower()
+
+            # Verify failure was recorded in database
+            assert mock_supabase_instance._request.call_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_model_extraction_failures(self, temporal_client, workflow_worker):
+        """Test workflow handling of model extraction failures."""
+        workflow_id = "test-workflow-extraction-failure"
+
+        test_notes = "Valid meeting notes with sufficient length for validation to pass."
+
+        with patch("activities.meeting_notes.get_model_client") as mock_model_client, \
+             patch("activities.meeting_notes.get_supabase_client") as mock_supabase:
+
+            # Mock model client to fail
+            mock_client_instance = AsyncMock()
+            mock_client_instance.get_provider_name.return_value = "openai"
+            mock_client_instance.get_model_name.return_value = "gpt-4"
+            mock_client_instance.extract_action_items.side_effect = Exception(
+                "API rate limit exceeded"
+            )
+            mock_model_client.return_value = mock_client_instance
+
+            # Mock supabase for failure recording
+            mock_supabase_instance = AsyncMock()
+            mock_supabase_instance._request.side_effect = [
+                [],  # No existing runs
+                [{"id": "extraction-run-failed-456"}]  # Created failure record
+            ]
+            mock_supabase.return_value = mock_supabase_instance
+
+            # Execute workflow
+            result = await temporal_client.execute_workflow(
+                ExtractMeetingActionItemsWorkflow.run,
+                args=["meeting-789", test_notes],
+                id=workflow_id,
+                task_queue="test-task-queue",
+            )
+
+            # Workflow should handle failure gracefully
+            assert result["status"] == "failed"
+            assert result["extraction_run_id"] == "extraction-run-failed-456"
+            assert "rate limit" in result["error"].lower()
+            assert result["model_provider"] == "openai"
+            assert result["model_name"] == "gpt-4"
+
+    @pytest.mark.asyncio
+    async def test_multiple_action_items(self, temporal_client, workflow_worker):
+        """Test workflow processing multiple action items successfully."""
+        workflow_id = "test-workflow-multiple-items"
+
+        test_notes = "Long meeting with many action items. " * 10  # Sufficient length
+
+        with patch("activities.meeting_notes.get_model_client") as mock_model_client, \
+             patch("activities.meeting_notes.get_supabase_client") as mock_supabase:
+
+            # Mock model client to return 10 action items
+            mock_client_instance = AsyncMock()
+            mock_client_instance.get_provider_name.return_value = "openai"
+            mock_client_instance.get_model_name.return_value = "gpt-4"
+
+            action_items = []
+            for i in range(1, 11):
+                mock_item = Mock()
+                mock_item.to_dict.return_value = {
+                    "description": f"Task {i}",
+                    "owner": f"Person{i}",
+                    "due_date": None,
+                    "confidence": 0.85
+                }
+                action_items.append(mock_item)
+
+            mock_client_instance.extract_action_items.return_value = action_items
+            mock_model_client.return_value = mock_client_instance
+
+            # Mock supabase client
+            mock_supabase_instance = AsyncMock()
+            mock_supabase_instance._request.side_effect = [
+                [],  # No existing runs
+                [{"id": "extraction-run-multi-123"}],  # Created extraction run
+                *[None for _ in range(10)]  # Created 10 action items
+            ]
+            mock_supabase.return_value = mock_supabase_instance
+
+            # Execute workflow
+            result = await temporal_client.execute_workflow(
+                ExtractMeetingActionItemsWorkflow.run,
+                args=["meeting-multi-123", test_notes],
+                id=workflow_id,
+                task_queue="test-task-queue",
+            )
+
+            # Verify result
+            assert result["status"] == "completed"
+            assert result["action_items_count"] == 10
+            assert result["extraction_run_id"] == "extraction-run-multi-123"
+
+            # Verify all 10 action items were persisted (1 run + 1 extraction record + 10 items = 12 calls)
+            assert mock_supabase_instance._request.call_count == 12
+
+    @pytest.mark.asyncio
+    async def test_retry_on_temporary_failure(self, temporal_client, workflow_worker):
+        """Test workflow retry mechanism on temporary failures."""
+        workflow_id = "test-workflow-retry-temporary"
+
+        test_notes = "Valid meeting notes for retry test with sufficient length."
+
+        call_count = {"count": 0}
+
+        def mock_extract_with_retry(notes):
+            call_count["count"] += 1
+            if call_count["count"] < 3:
+                raise Exception("Temporary network error")
+            # Success on third attempt
+            mock_item = Mock()
+            mock_item.to_dict.return_value = {
+                "description": "Success after retry",
+                "owner": "Test",
+                "due_date": None,
+                "confidence": 0.90
+            }
+            return [mock_item]
+
+        with patch("activities.meeting_notes.get_model_client") as mock_model_client, \
+             patch("activities.meeting_notes.get_supabase_client") as mock_supabase:
+
+            # Mock model client with retry behavior
+            mock_client_instance = AsyncMock()
+            mock_client_instance.get_provider_name.return_value = "openai"
+            mock_client_instance.get_model_name.return_value = "gpt-4"
+            mock_client_instance.extract_action_items.side_effect = mock_extract_with_retry
+            mock_model_client.return_value = mock_client_instance
+
+            # Mock supabase client
+            mock_supabase_instance = AsyncMock()
+            mock_supabase_instance._request.side_effect = [
+                [],  # No existing runs
+                [{"id": "extraction-run-retry-123"}],  # Created extraction run
+                None  # Created action item
+            ]
+            mock_supabase.return_value = mock_supabase_instance
+
+            # Execute workflow
+            result = await temporal_client.execute_workflow(
+                ExtractMeetingActionItemsWorkflow.run,
+                args=["meeting-retry-123", test_notes],
+                id=workflow_id,
+                task_queue="test-task-queue",
+            )
+
+            # Verify workflow succeeded after retries
+            assert result["status"] == "completed"
+            assert result["action_items_count"] == 1
+            assert call_count["count"] == 3  # Failed twice, succeeded on third attempt
+
+    @pytest.mark.asyncio
+    async def test_timeout_handling(self, temporal_client, workflow_worker):
+        """Test workflow timeout handling."""
+        workflow_id = "test-workflow-timeout"
+
+        test_notes = "Valid meeting notes for timeout test with sufficient length."
+
+        async def slow_extract(notes):
+            await asyncio.sleep(100)  # Simulate long-running operation
+            return []
+
+        with patch("activities.meeting_notes.get_model_client") as mock_model_client:
+            # Mock model client to be slow
+            mock_client_instance = AsyncMock()
+            mock_client_instance.get_provider_name.return_value = "openai"
+            mock_client_instance.get_model_name.return_value = "gpt-4"
+            mock_client_instance.extract_action_items.side_effect = slow_extract
+            mock_model_client.return_value = mock_client_instance
+
+            # Execute workflow with short timeout
+            with pytest.raises(WorkflowFailureError) as exc_info:
+                await temporal_client.execute_workflow(
+                    ExtractMeetingActionItemsWorkflow.run,
+                    args=["meeting-timeout-123", test_notes],
+                    id=workflow_id,
+                    task_queue="test-task-queue",
+                    execution_timeout=timedelta(seconds=2),
+                )
+
+            # Verify timeout occurred
+            assert "timeout" in str(exc_info.value).lower() or \
+                   "time" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_empty_action_items(self, temporal_client, workflow_worker):
+        """Test workflow handling when no action items are extracted."""
+        workflow_id = "test-workflow-empty-items"
+
+        test_notes = "Meeting notes with no actionable items, just general discussion."
+
+        with patch("activities.meeting_notes.get_model_client") as mock_model_client, \
+             patch("activities.meeting_notes.get_supabase_client") as mock_supabase:
+
+            # Mock model client to return empty list
+            mock_client_instance = AsyncMock()
+            mock_client_instance.get_provider_name.return_value = "openai"
+            mock_client_instance.get_model_name.return_value = "gpt-4"
+            mock_client_instance.extract_action_items.return_value = []
+            mock_model_client.return_value = mock_client_instance
+
+            # Mock supabase client
+            mock_supabase_instance = AsyncMock()
+            mock_supabase_instance._request.side_effect = [
+                [],  # No existing runs
+                [{"id": "extraction-run-empty-123"}]  # Created extraction run
+            ]
+            mock_supabase.return_value = mock_supabase_instance
+
+            # Execute workflow
+            result = await temporal_client.execute_workflow(
+                ExtractMeetingActionItemsWorkflow.run,
+                args=["meeting-empty-123", test_notes],
+                id=workflow_id,
+                task_queue="test-task-queue",
+            )
+
+            # Verify result
+            assert result["status"] == "completed"
+            assert result["action_items_count"] == 0
+            assert result["extraction_run_id"] == "extraction-run-empty-123"
+
+    @pytest.mark.asyncio
+    async def test_activity_retry_with_eventual_success(self, temporal_client, workflow_worker):
+        """Test activity-level retry mechanism with eventual success."""
+        workflow_id = "test-workflow-activity-retry"
+
+        test_notes = "Valid meeting notes for activity retry test with sufficient length."
+
+        call_count = {"count": 0}
+
+        def mock_extract_with_retry(notes):
+            call_count["count"] += 1
+            if call_count["count"] == 1:
+                raise Exception("First attempt fails")
+            # Success on second attempt
+            mock_item = Mock()
+            mock_item.to_dict.return_value = {
+                "description": "Task after retry",
+                "owner": "Test",
+                "due_date": None,
+                "confidence": 0.88
+            }
+            return [mock_item]
+
+        with patch("activities.meeting_notes.get_model_client") as mock_model_client, \
+             patch("activities.meeting_notes.get_supabase_client") as mock_supabase:
+
+            # Mock model client with retry behavior
+            mock_client_instance = AsyncMock()
+            mock_client_instance.get_provider_name.return_value = "openai"
+            mock_client_instance.get_model_name.return_value = "gpt-4"
+            mock_client_instance.extract_action_items.side_effect = mock_extract_with_retry
+            mock_model_client.return_value = mock_client_instance
+
+            # Mock supabase client
+            mock_supabase_instance = AsyncMock()
+            mock_supabase_instance._request.side_effect = [
+                [],  # No existing runs
+                [{"id": "extraction-run-activity-retry-123"}],  # Created extraction run
+                None  # Created action item
+            ]
+            mock_supabase.return_value = mock_supabase_instance
+
+            # Execute workflow
+            result = await temporal_client.execute_workflow(
+                ExtractMeetingActionItemsWorkflow.run,
+                args=["meeting-activity-retry-123", test_notes],
+                id=workflow_id,
+                task_queue="test-task-queue",
+            )
+
+            # Verify workflow succeeded after activity retry
+            assert result["status"] == "completed"
+            assert result["action_items_count"] == 1
+            assert call_count["count"] == 2  # Failed once, succeeded on second attempt
+
+
+    @pytest.mark.asyncio
+    async def test_validation_too_short_notes(self, temporal_client, workflow_worker):
+        """Test workflow validation failure with notes that are too short."""
+        workflow_id = "test-workflow-short-notes"
+
+        # Less than 10 characters
+        short_notes = "Too short"
+
+        with patch("activities.meeting_notes.get_supabase_client") as mock_supabase:
+            # Mock supabase for failure recording
+            mock_supabase_instance = AsyncMock()
+            mock_supabase_instance._request.side_effect = [
+                [],  # No existing runs
+                [{"id": "extraction-run-short-123"}]  # Created failure record
+            ]
+            mock_supabase.return_value = mock_supabase_instance
+
+            # Execute workflow
+            result = await temporal_client.execute_workflow(
+                ExtractMeetingActionItemsWorkflow.run,
+                args=["meeting-short-123", short_notes],
+                id=workflow_id,
+                task_queue="test-task-queue",
+            )
+
+            # Verify validation failure
+            assert result["status"] == "failed"
+            assert "too short" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_validation_too_long_notes(self, temporal_client, workflow_worker):
+        """Test workflow validation failure with notes exceeding character limit."""
+        workflow_id = "test-workflow-long-notes"
+
+        # More than 10,000 characters
+        long_notes = "x" * 10001
+
+        with patch("activities.meeting_notes.get_supabase_client") as mock_supabase:
+            # Mock supabase for failure recording
+            mock_supabase_instance = AsyncMock()
+            mock_supabase_instance._request.side_effect = [
+                [],  # No existing runs
+                [{"id": "extraction-run-long-123"}]  # Created failure record
+            ]
+            mock_supabase.return_value = mock_supabase_instance
+
+            # Execute workflow
+            result = await temporal_client.execute_workflow(
+                ExtractMeetingActionItemsWorkflow.run,
+                args=["meeting-long-123", long_notes],
+                id=workflow_id,
+                task_queue="test-task-queue",
+            )
+
+            # Verify validation failure
+            assert result["status"] == "failed"
+            assert "exceed" in result["error"].lower() or "10,000" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_database_persistence_failure(self, temporal_client, workflow_worker):
+        """Test workflow handling of database persistence failures."""
+        workflow_id = "test-workflow-db-failure"
+
+        test_notes = "Meeting notes for database failure test with sufficient length."
+
+        with patch("activities.meeting_notes.get_model_client") as mock_model_client, \
+             patch("activities.meeting_notes.get_supabase_client") as mock_supabase:
+
+            # Mock model client to succeed
+            mock_client_instance = AsyncMock()
+            mock_client_instance.get_provider_name.return_value = "openai"
+            mock_client_instance.get_model_name.return_value = "gpt-4"
+            mock_item = Mock()
+            mock_item.to_dict.return_value = {
+                "description": "Test task",
+                "owner": "Test",
+                "due_date": None,
+                "confidence": 0.90
+            }
+            mock_client_instance.extract_action_items.return_value = [mock_item]
+            mock_model_client.return_value = mock_client_instance
+
+            # Mock supabase to fail during persistence
+            mock_supabase_instance = AsyncMock()
+            mock_supabase_instance._request.side_effect = [
+                Exception("Database connection failed")
+            ]
+            mock_supabase.return_value = mock_supabase_instance
+
+            # Execute workflow
+            result = await temporal_client.execute_workflow(
+                ExtractMeetingActionItemsWorkflow.run,
+                args=["meeting-db-fail-123", test_notes],
+                id=workflow_id,
+                task_queue="test-task-queue",
+            )
+
+            # Verify workflow handles database failure
+            assert result["status"] == "failed"
+            assert "database" in result["error"].lower() or "connection" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_workflow_with_existing_extraction_run(self, temporal_client, workflow_worker):
+        """Test workflow updating existing extraction run instead of creating new one."""
+        workflow_id = "test-workflow-existing-run"
+
+        test_notes = "Meeting notes for testing existing extraction run update."
+
+        with patch("activities.meeting_notes.get_model_client") as mock_model_client, \
+             patch("activities.meeting_notes.get_supabase_client") as mock_supabase:
+
+            # Mock model client
+            mock_client_instance = AsyncMock()
+            mock_client_instance.get_provider_name.return_value = "anthropic"
+            mock_client_instance.get_model_name.return_value = "claude-3-sonnet"
+            mock_item = Mock()
+            mock_item.to_dict.return_value = {
+                "description": "Update existing run",
+                "owner": "Test",
+                "due_date": None,
                 "confidence": 0.92
             }
-            mock_model_client.extract_action_items = AsyncMock(
-                return_value=[mock_action_item]
+            mock_client_instance.extract_action_items.return_value = [mock_item]
+            mock_model_client.return_value = mock_client_instance
+
+            # Mock supabase to return existing run
+            existing_run_id = "existing-run-456"
+            mock_supabase_instance = AsyncMock()
+            mock_supabase_instance._request.side_effect = [
+                [{"id": existing_run_id, "status": "processing"}],  # Found existing run
+                None,  # Updated extraction run
+                None   # Created action item
+            ]
+            mock_supabase.return_value = mock_supabase_instance
+
+            # Execute workflow
+            result = await temporal_client.execute_workflow(
+                ExtractMeetingActionItemsWorkflow.run,
+                args=["meeting-existing-123", test_notes],
+                id=workflow_id,
+                task_queue="test-task-queue",
             )
 
-            # Mock Supabase client
-            mock_supabase_client = Mock()
-            mock_supabase_client._request = AsyncMock(
-                side_effect=[
-                    # First call: GET to find existing extraction run
-                    [{
-                        "id": "test-extraction-run-id",
-                        "status": "processing",
-                        "workflow_id": "test-workflow-123"
-                    }],
-                    # Second call: PATCH to update extraction run
-                    {
-                        "id": "test-extraction-run-id",
-                        "status": "completed"
-                    },
-                    # Subsequent calls: POST action items
-                    {"id": "action-item-1"},
-                ]
-            )
-
-            with patch('activities.meeting_notes.get_model_client', return_value=mock_model_client), \
-                 patch('activities.meeting_notes.get_supabase_client', return_value=mock_supabase_client):
-
-                worker = Worker(
-                    env.client,
-                    task_queue="test",
-                    workflows=[ExtractMeetingActionItemsWorkflow],
-                    activities=[
-                        validate_meeting_notes_input,
-                        call_model_for_action_item_extraction,
-                        persist_extraction_results,
-                        record_extraction_failure
-                    ]
-                )
-
-                async with worker:
-                    result = await env.client.execute_workflow(
-                        ExtractMeetingActionItemsWorkflow.run,
-                        args=[
-                            "test-meeting-note-id",
-                            "Team meeting: John needs to follow up with stakeholders by July 15th"
-                        ],
-                        id="test-workflow-123",
-                        task_queue="test",
-                        execution_timeout=timedelta(seconds=30)
-                    )
-
-                    # Verify result
-                    assert result is not None
-                    assert result["status"] == "completed"
-                    assert result["extraction_run_id"] == "test-extraction-run-id"
-                    assert result["action_items_count"] == 1
-                    assert result["model_provider"] == "azure"
-                    assert result["model_name"] == "gpt-4"
-
-                    # Verify model client was called
-                    mock_model_client.extract_action_items.assert_called_once()
-
-                    # Verify Supabase was called to persist results
-                    assert mock_supabase_client._request.called
-                    assert mock_supabase_client._request.call_count >= 2
+            # Verify result uses existing run
+            assert result["status"] == "completed"
+            assert result["extraction_run_id"] == existing_run_id
+            assert result["action_items_count"] == 1
 
     @pytest.mark.asyncio
-    async def test_workflow_validation_failure(self):
-        """Test workflow handles validation failures correctly."""
-        async with await WorkflowEnvironment.start_time_skipping() as env:
-            mock_supabase_client = Mock()
-            mock_supabase_client._request = AsyncMock(
-                return_value=[{
-                    "id": "test-extraction-run-id",
-                    "workflow_id": "test-workflow-fail"
-                }]
+    async def test_workflow_with_different_model_provider(self, temporal_client, workflow_worker):
+        """Test workflow execution with different model provider."""
+        workflow_id = "test-workflow-different-provider"
+
+        test_notes = "Meeting notes for testing different model provider support."
+
+        with patch("activities.meeting_notes.get_model_client") as mock_model_client, \
+             patch("activities.meeting_notes.get_supabase_client") as mock_supabase:
+
+            # Mock model client with different provider
+            mock_client_instance = AsyncMock()
+            mock_client_instance.get_provider_name.return_value = "anthropic"
+            mock_client_instance.get_model_name.return_value = "claude-3-opus"
+            mock_item = Mock()
+            mock_item.to_dict.return_value = {
+                "description": "Task from Claude",
+                "owner": "Alice",
+                "due_date": "2026-07-15",
+                "confidence": 0.96
+            }
+            mock_client_instance.extract_action_items.return_value = [mock_item]
+            mock_model_client.return_value = mock_client_instance
+
+            # Mock supabase client
+            mock_supabase_instance = AsyncMock()
+            mock_supabase_instance._request.side_effect = [
+                [],  # No existing runs
+                [{"id": "extraction-run-anthropic-123"}],  # Created extraction run
+                None  # Created action item
+            ]
+            mock_supabase.return_value = mock_supabase_instance
+
+            # Execute workflow
+            result = await temporal_client.execute_workflow(
+                ExtractMeetingActionItemsWorkflow.run,
+                args=["meeting-anthropic-123", test_notes],
+                id=workflow_id,
+                task_queue="test-task-queue",
             )
 
-            with patch('activities.meeting_notes.get_supabase_client', return_value=mock_supabase_client):
-                worker = Worker(
-                    env.client,
-                    task_queue="test",
-                    workflows=[ExtractMeetingActionItemsWorkflow],
-                    activities=[
-                        validate_meeting_notes_input,
-                        call_model_for_action_item_extraction,
-                        persist_extraction_results,
-                        record_extraction_failure
-                    ]
-                )
-
-                async with worker:
-                    # Execute with invalid input (too short)
-                    result = await env.client.execute_workflow(
-                        ExtractMeetingActionItemsWorkflow.run,
-                        args=["test-meeting-note-id", "Short"],
-                        id="test-workflow-fail",
-                        task_queue="test",
-                        execution_timeout=timedelta(seconds=30)
-                    )
-
-                    # Should return failed status
-                    assert result["status"] == "failed"
-                    assert "error" in result
-                    assert "too short" in result["error"].lower()
-                    assert result["extraction_run_id"] == "test-extraction-run-id"
-
-    @pytest.mark.asyncio
-    async def test_workflow_model_extraction_failure(self):
-        """Test workflow handles model extraction failures."""
-        async with await WorkflowEnvironment.start_time_skipping() as env:
-            # Mock model client that fails
-            mock_model_client = Mock()
-            mock_model_client.get_provider_name.return_value = "bedrock"
-            mock_model_client.get_model_name.return_value = "claude-3"
-            mock_model_client.extract_action_items = AsyncMock(
-                side_effect=Exception("Model API timeout")
-            )
-
-            mock_supabase_client = Mock()
-            mock_supabase_client._request = AsyncMock(
-                return_value=[{
-                    "id": "test-extraction-run-id",
-                    "workflow_id": "test-workflow-model-fail"
-                }]
-            )
-
-            with patch('activities.meeting_notes.get_model_client', return_value=mock_model_client), \
-                 patch('activities.meeting_notes.get_supabase_client', return_value=mock_supabase_client):
-
-                worker = Worker(
-                    env.client,
-                    task_queue="test",
-                    workflows=[ExtractMeetingActionItemsWorkflow],
-                    activities=[
-                        validate_meeting_notes_input,
-                        call_model_for_action_item_extraction,
-                        persist_extraction_results,
-                        record_extraction_failure
-                    ]
-                )
-
-                async with worker:
-                    result = await env.client.execute_workflow(
-                        ExtractMeetingActionItemsWorkflow.run,
-                        args=[
-                            "test-meeting-note-id",
-                            "Valid meeting notes that will fail at model extraction"
-                        ],
-                        id="test-workflow-model-fail",
-                        task_queue="test",
-                        execution_timeout=timedelta(seconds=30)
-                    )
-
-                    # Should record failure
-                    assert result["status"] == "failed"
-                    assert "Model API timeout" in result["error"]
-                    assert result["extraction_run_id"] is not None
-
-    @pytest.mark.asyncio
-    async def test_workflow_with_multiple_action_items(self):
-        """Test workflow handling multiple action items."""
-        async with await WorkflowEnvironment.start_time_skipping() as env:
-            # Mock model client returning multiple items
-            mock_model_client = Mock()
-            mock_model_client.get_provider_name.return_value = "bedrock"
-            mock_model_client.get_model_name.return_value = "claude-3-sonnet"
-
-            mock_items = []
-            for i in range(5):
-                mock_item = Mock()
-                mock_item.to_dict.return_value = {
-                    "description": f"Action item {i+1}",
-                    "owner": f"Person{i+1}",
-                    "due_date": f"2026-07-{10+i}",
-                    "confidence": 0.85 + (i * 0.02)
-                }
-                mock_items.append(mock_item)
-
-            mock_model_client.extract_action_items = AsyncMock(return_value=mock_items)
-
-            mock_supabase_client = Mock()
-            mock_supabase_client._request = AsyncMock(
-                side_effect=[
-                    # GET existing run
-                    [{"id": "test-run-multi", "workflow_id": "test-workflow-multi"}],
-                    # PATCH update run
-                    {"id": "test-run-multi"},
-                    # POST action items (5 calls)
-                    {"id": "item-1"},
-                    {"id": "item-2"},
-                    {"id": "item-3"},
-                    {"id": "item-4"},
-                    {"id": "item-5"},
-                ]
-            )
-
-            with patch('activities.meeting_notes.get_model_client', return_value=mock_model_client), \
-                 patch('activities.meeting_notes.get_supabase_client', return_value=mock_supabase_client):
-
-                worker = Worker(
-                    env.client,
-                    task_queue="test",
-                    workflows=[ExtractMeetingActionItemsWorkflow],
-                    activities=[
-                        validate_meeting_notes_input,
-                        call_model_for_action_item_extraction,
-                        persist_extraction_results,
-                        record_extraction_failure
-                    ]
-                )
-
-                async with worker:
-                    result = await env.client.execute_workflow(
-                        ExtractMeetingActionItemsWorkflow.run,
-                        args=[
-                            "test-meeting-note-id",
-                            "Long meeting with many action items discussed"
-                        ],
-                        id="test-workflow-multi",
-                        task_queue="test",
-                        execution_timeout=timedelta(seconds=30)
-                    )
-
-                    assert result["status"] == "completed"
-                    assert result["action_items_count"] == 5
-
-                    # Verify all action items were persisted (1 GET + 1 PATCH + 5 POST = 7)
-                    assert mock_supabase_client._request.call_count == 7
-
-    @pytest.mark.asyncio
-    async def test_workflow_retry_on_temporary_failure(self):
-        """Test workflow retries on temporary failures."""
-        async with await WorkflowEnvironment.start_time_skipping() as env:
-            call_count = {"count": 0}
-
-            # Mock model client that fails first time
-            mock_model_client = Mock()
-            mock_model_client.get_provider_name.return_value = "azure"
-            mock_model_client.get_model_name.return_value = "gpt-4"
-
-            async def extract_with_retry(notes: str):
-                call_count["count"] += 1
-                if call_count["count"] == 1:
-                    raise Exception("Temporary network error")
-
-                mock_item = Mock()
-                mock_item.to_dict.return_value = {
-                    "description": "Recovered action",
-                    "owner": "Alice",
-                    "due_date": None,
-                    "confidence": 0.88
-                }
-                return [mock_item]
-
-            mock_model_client.extract_action_items = extract_with_retry
-
-            mock_supabase_client = Mock()
-            mock_supabase_client._request = AsyncMock(
-                side_effect=[
-                    [{"id": "test-run-retry", "workflow_id": "test-workflow-retry"}],
-                    {"id": "test-run-retry"},
-                    {"id": "item-1"},
-                ]
-            )
-
-            with patch('activities.meeting_notes.get_model_client', return_value=mock_model_client), \
-                 patch('activities.meeting_notes.get_supabase_client', return_value=mock_supabase_client):
-
-                worker = Worker(
-                    env.client,
-                    task_queue="test",
-                    workflows=[ExtractMeetingActionItemsWorkflow],
-                    activities=[
-                        validate_meeting_notes_input,
-                        call_model_for_action_item_extraction,
-                        persist_extraction_results,
-                        record_extraction_failure
-                    ]
-                )
-
-                async with worker:
-                    result = await env.client.execute_workflow(
-                        ExtractMeetingActionItemsWorkflow.run,
-                        args=["test-meeting-note-id", "Test meeting notes for retry"],
-                        id="test-workflow-retry",
-                        task_queue="test",
-                        execution_timeout=timedelta(seconds=30)
-                    )
-
-                    # Should succeed after retry
-                    assert result["status"] == "completed"
-                    assert result["action_items_count"] == 1
-                    assert call_count["count"] == 2  # Failed once, succeeded on retry
-
-    @pytest.mark.asyncio
-    async def test_workflow_timeout_handling(self):
-        """Test workflow handles activity timeouts."""
-        async with await WorkflowEnvironment.start_time_skipping() as env:
-            # Mock model client that takes too long
-            mock_model_client = Mock()
-            mock_model_client.get_provider_name.return_value = "azure"
-            mock_model_client.get_model_name.return_value = "gpt-4"
-
-            async def slow_extract(notes: str):
-                await asyncio.sleep(100)  # Longer than timeout
-                return []
-
-            mock_model_client.extract_action_items = slow_extract
-
-            mock_supabase_client = Mock()
-            mock_supabase_client._request = AsyncMock(
-                return_value=[{
-                    "id": "test-run-timeout",
-                    "workflow_id": "test-workflow-timeout"
-                }]
-            )
-
-            with patch('activities.meeting_notes.get_model_client', return_value=mock_model_client), \
-                 patch('activities.meeting_notes.get_supabase_client', return_value=mock_supabase_client):
-
-                worker = Worker(
-                    env.client,
-                    task_queue="test",
-                    workflows=[ExtractMeetingActionItemsWorkflow],
-                    activities=[
-                        validate_meeting_notes_input,
-                        call_model_for_action_item_extraction,
-                        persist_extraction_results,
-                        record_extraction_failure
-                    ]
-                )
-
-                async with worker:
-                    result = await env.client.execute_workflow(
-                        ExtractMeetingActionItemsWorkflow.run,
-                        args=["test-meeting-note-id", "Test timeout handling"],
-                        id="test-workflow-timeout",
-                        task_queue="test",
-                        execution_timeout=timedelta(seconds=30)
-                    )
-
-                    # Should fail and record error
-                    assert result["status"] == "failed"
-                    assert "error" in result
-
-    @pytest.mark.asyncio
-    async def test_workflow_with_empty_action_items(self):
-        """Test workflow handles case where no action items are found."""
-        async with await WorkflowEnvironment.start_time_skipping() as env:
-            # Mock model client returning empty list
-            mock_model_client = Mock()
-            mock_model_client.get_provider_name.return_value = "bedrock"
-            mock_model_client.get_model_name.return_value = "claude-3-haiku"
-            mock_model_client.extract_action_items = AsyncMock(return_value=[])
-
-            mock_supabase_client = Mock()
-            mock_supabase_client._request = AsyncMock(
-                side_effect=[
-                    [{"id": "test-run-empty", "workflow_id": "test-workflow-empty"}],
-                    {"id": "test-run-empty"},
-                ]
-            )
-
-            with patch('activities.meeting_notes.get_model_client', return_value=mock_model_client), \
-                 patch('activities.meeting_notes.get_supabase_client', return_value=mock_supabase_client):
-
-                worker = Worker(
-                    env.client,
-                    task_queue="test",
-                    workflows=[ExtractMeetingActionItemsWorkflow],
-                    activities=[
-                        validate_meeting_notes_input,
-                        call_model_for_action_item_extraction,
-                        persist_extraction_results,
-                        record_extraction_failure
-                    ]
-                )
-
-                async with worker:
-                    result = await env.client.execute_workflow(
-                        ExtractMeetingActionItemsWorkflow.run,
-                        args=[
-                            "test-meeting-note-id",
-                            "This meeting had no actionable items, just discussion."
-                        ],
-                        id="test-workflow-empty",
-                        task_queue="test",
-                        execution_timeout=timedelta(seconds=30)
-                    )
-
-                    # Should succeed with 0 action items
-                    assert result["status"] == "completed"
-                    assert result["action_items_count"] == 0
-                    assert result["extraction_run_id"] is not None
+            # Verify correct provider information
+            assert result["status"] == "completed"
+            assert result["model_provider"] == "anthropic"
+            assert result["model_name"] == "claude-3-opus"
 
 
-# Import asyncio for timeout test
-import asyncio
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

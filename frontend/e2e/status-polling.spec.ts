@@ -1,342 +1,465 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, Page } from '@playwright/test';
 
-test.describe('Status Polling Flow', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto('/meeting-notes');
+test.describe('Status Polling Behavior', () => {
+  let page: Page;
+
+  test.beforeEach(async ({ page: testPage }) => {
+    page = testPage;
+    await page.goto('/');
   });
 
-  test('should create extraction_run with processing status', async ({ page }) => {
-    // Track database calls
-    const dbRequests: any[] = [];
-    page.on('request', request => {
-      if (request.url().includes('/rest/v1/extraction_runs')) {
-        dbRequests.push({
-          method: request.method(),
-          url: request.url(),
-          postData: request.postData()
+  test('should create extraction_run on form submission', async () => {
+    // Submit the form
+    await page.fill('input[name="dataInput"]', 'test data');
+    await page.click('button[type="submit"]');
+
+    // Wait for API call and verify extraction_run was created
+    const response = await page.waitForResponse(
+      (response) => response.url().includes('/api/extraction-runs') && response.status() === 201
+    );
+
+    const responseData = await response.json();
+    expect(responseData).toHaveProperty('id');
+    expect(responseData).toHaveProperty('status');
+    expect(responseData.status).toBe('pending');
+  });
+
+  test('should poll for status updates every 2 seconds and reflect actual workflow status', async () => {
+    // Mock status progression through actual workflow states
+    let callCount = 0;
+    const statusProgression = ['pending', 'processing', 'processing', 'completed'];
+
+    await page.route('**/api/extraction-runs/*', async (route) => {
+      if (route.request().method() === 'GET') {
+        const status = statusProgression[Math.min(callCount, statusProgression.length - 1)];
+        callCount++;
+        await route.fulfill({
+          status: 200,
+          body: JSON.stringify({ id: '123', status, progress: callCount * 25 }),
         });
       }
     });
 
-    const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-    const submitButton = page.getByRole('button', { name: /extract action items/i });
+    // Submit form to trigger polling
+    await page.fill('input[name="dataInput"]', 'test data');
+    await page.click('button[type="submit"]');
 
-    await notesInput.fill('Test meeting notes about project updates and action items');
-    await submitButton.click();
-
-    // Wait a moment for requests to be made
-    await page.waitForTimeout(2000);
-
-    // Should have created extraction_run record
-    const postRequests = dbRequests.filter(r => r.method === 'POST');
-    expect(postRequests.length).toBeGreaterThan(0);
-
-    // Should start showing processing state
-    await expect(page.getByText(/processing/i)).toBeVisible({ timeout: 5000 });
-  });
-
-  test('should poll extraction_run status every 2 seconds', async ({ page }) => {
-    const pollRequests: number[] = [];
-    let lastPollTime = Date.now();
-
-    page.on('request', request => {
-      if (
-        request.method() === 'GET' &&
-        request.url().includes('/rest/v1/extraction_runs?')
-      ) {
-        const currentTime = Date.now();
-        const timeSinceLast = currentTime - lastPollTime;
-        pollRequests.push(timeSinceLast);
-        lastPollTime = currentTime;
+    // Track polling requests
+    const pollingRequests: number[] = [];
+    page.on('request', (request) => {
+      if (request.url().includes('/api/extraction-runs/') && request.method() === 'GET') {
+        pollingRequests.push(Date.now());
       }
     });
 
-    const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-    const submitButton = page.getByRole('button', { name: /extract action items/i });
+    // Verify status progresses through actual workflow states
+    await expect(page.locator('[data-status="pending"]')).toBeVisible({ timeout: 2000 });
+    await expect(page.locator('[data-status="processing"]')).toBeVisible({ timeout: 3000 });
+    await expect(page.locator('[data-status="completed"]')).toBeVisible({ timeout: 10000 });
 
-    await notesInput.fill('Test meeting notes for polling test');
-    await submitButton.click();
+    // Verify polling interval is approximately 2 seconds
+    expect(pollingRequests.length).toBeGreaterThanOrEqual(3);
+    for (let i = 1; i < pollingRequests.length; i++) {
+      const interval = pollingRequests[i] - pollingRequests[i - 1];
+      expect(interval).toBeGreaterThanOrEqual(1800);
+      expect(interval).toBeLessThanOrEqual(2500);
+    }
 
-    // Wait for processing to start
-    await expect(page.getByText(/processing/i)).toBeVisible({ timeout: 5000 });
-
-    // Wait to observe polling behavior (at least 3 polls)
-    await page.waitForTimeout(7000);
-
-    // Should have made multiple poll requests
-    expect(pollRequests.length).toBeGreaterThanOrEqual(2);
-
-    // Check that polling interval is approximately 2 seconds (1800-2200ms)
-    const validIntervals = pollRequests.filter(
-      interval => interval >= 1800 && interval <= 2500
-    );
-    expect(validIntervals.length).toBeGreaterThan(0);
-  });
-
-  test('should stop polling when status changes to completed', async ({ page }) => {
-    let pollCount = 0;
-
-    page.on('request', request => {
-      if (
-        request.method() === 'GET' &&
-        request.url().includes('/rest/v1/extraction_runs')
-      ) {
-        pollCount++;
-      }
-    });
-
-    const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-    const submitButton = page.getByRole('button', { name: /extract action items/i });
-
-    await notesInput.fill('Test meeting notes with action items');
-    await submitButton.click();
-
-    // Wait for completion
-    await expect(page.getByText(/extraction complete/i)).toBeVisible({ timeout: 45000 });
-
-    const pollCountAtCompletion = pollCount;
-
-    // Wait additional time to verify polling stopped
+    // Verify polling stopped after completion
+    const requestCountBefore = pollingRequests.length;
     await page.waitForTimeout(5000);
 
-    // Poll count should not increase significantly after completion
-    // Allow for 1-2 more polls due to timing
-    expect(pollCount).toBeLessThanOrEqual(pollCountAtCompletion + 2);
+    // Count requests after waiting - should be same since polling stopped
+    const finalCallCount = callCount;
+    expect(finalCallCount).toBeLessThanOrEqual(requestCountBefore + 1);
   });
 
-  test('should stop polling when status changes to failed', async ({ page }) => {
-    await page.route('http://localhost:8000/trigger-workflow', route => {
-      route.fulfill({
-        status: 500,
-        contentType: 'application/json',
-        body: JSON.stringify({ detail: 'Test error' })
+  test('should stop polling when status is completed', async () => {
+    await page.route('**/api/extraction-runs/*', async (route) => {
+      const requestCount = await page.evaluate(() => window.requestCount || 0);
+
+      if (requestCount < 2) {
+        await page.evaluate(() => window.requestCount = (window.requestCount || 0) + 1);
+        await route.fulfill({
+          status: 200,
+          body: JSON.stringify({ id: '123', status: 'processing' }),
+        });
+      } else {
+        await route.fulfill({
+          status: 200,
+          body: JSON.stringify({ id: '123', status: 'completed', result: 'success' }),
+        });
+      }
+    });
+
+    await page.fill('input[name="dataInput"]', 'test data');
+    await page.click('button[type="submit"]');
+
+    // Wait for completion status
+    await page.waitForSelector('[data-status="completed"]');
+
+    const requestsBefore = await page.evaluate(() => window.requestCount || 0);
+    await page.waitForTimeout(5000);
+    const requestsAfter = await page.evaluate(() => window.requestCount || 0);
+
+    // No new requests should have been made after completion
+    expect(requestsAfter).toBe(requestsBefore);
+  });
+
+  test('should stop polling when status is failed', async () => {
+    await page.route('**/api/extraction-runs/*', async (route) => {
+      const requestCount = await page.evaluate(() => window.requestCount || 0);
+
+      if (requestCount < 2) {
+        await page.evaluate(() => window.requestCount = (window.requestCount || 0) + 1);
+        await route.fulfill({
+          status: 200,
+          body: JSON.stringify({ id: '123', status: 'processing' }),
+        });
+      } else {
+        await route.fulfill({
+          status: 200,
+          body: JSON.stringify({ id: '123', status: 'failed', error: 'Processing error' }),
+        });
+      }
+    });
+
+    await page.fill('input[name="dataInput"]', 'test data');
+    await page.click('button[type="submit"]');
+
+    // Wait for failed status
+    await page.waitForSelector('[data-status="failed"]');
+
+    const requestsBefore = await page.evaluate(() => window.requestCount || 0);
+    await page.waitForTimeout(5000);
+    const requestsAfter = await page.evaluate(() => window.requestCount || 0);
+
+    // No new requests should have been made after failure
+    expect(requestsAfter).toBe(requestsBefore);
+  });
+
+  test('should display real-time status updates in UI', async () => {
+    const statuses = ['pending', 'processing', 'completed'];
+    let statusIndex = 0;
+
+    await page.route('**/api/extraction-runs/*', async (route) => {
+      const status = statuses[Math.min(statusIndex++, statuses.length - 1)];
+      await route.fulfill({
+        status: 200,
+        body: JSON.stringify({ id: '123', status, progress: statusIndex * 33 }),
       });
     });
 
-    let pollCount = 0;
+    await page.fill('input[name="dataInput"]', 'test data');
+    await page.click('button[type="submit"]');
 
-    page.on('request', request => {
-      if (
-        request.method() === 'GET' &&
-        request.url().includes('/rest/v1/extraction_runs')
-      ) {
-        pollCount++;
+    // Verify each status appears in UI
+    await expect(page.locator('[data-status="pending"]')).toBeVisible();
+    await expect(page.locator('[data-status="processing"]')).toBeVisible();
+    await expect(page.locator('[data-status="completed"]')).toBeVisible();
+  });
+
+  test('should handle network delays gracefully', async () => {
+    await page.route('**/api/extraction-runs/*', async (route) => {
+      // Simulate 3-second network delay
+      await page.waitForTimeout(3000);
+      await route.fulfill({
+        status: 200,
+        body: JSON.stringify({ id: '123', status: 'processing' }),
+      });
+    });
+
+    await page.fill('input[name="dataInput"]', 'test data');
+    await page.click('button[type="submit"]');
+
+    // UI should show loading state
+    await expect(page.locator('[data-loading="true"]')).toBeVisible();
+
+    // Eventually receive response
+    await page.waitForSelector('[data-status="processing"]', { timeout: 10000 });
+  });
+
+  test('should maintain UI state during polling', async () => {
+    await page.route('**/api/extraction-runs/*', async (route) => {
+      await route.fulfill({
+        status: 200,
+        body: JSON.stringify({ id: '123', status: 'processing', progress: 50 }),
+      });
+    });
+
+    await page.fill('input[name="dataInput"]', 'test data');
+    await page.click('button[type="submit"]');
+
+    await page.waitForSelector('[data-status="processing"]');
+
+    // Interact with UI during polling
+    await page.click('button[data-action="expand-details"]');
+    await page.waitForTimeout(3000);
+
+    // UI state should be maintained
+    await expect(page.locator('[data-details-expanded="true"]')).toBeVisible();
+    await expect(page.locator('[data-status="processing"]')).toBeVisible();
+  });
+
+  test('should update UI immediately when status changes', async () => {
+    let callCount = 0;
+
+    await page.route('**/api/extraction-runs/*', async (route) => {
+      callCount++;
+      const status = callCount === 1 ? 'pending' : 'completed';
+      await route.fulfill({
+        status: 200,
+        body: JSON.stringify({ id: '123', status }),
+      });
+    });
+
+    await page.fill('input[name="dataInput"]', 'test data');
+    await page.click('button[type="submit"]');
+
+    // First status should appear immediately
+    await expect(page.locator('[data-status="pending"]')).toBeVisible({ timeout: 1000 });
+
+    // Status change should update UI quickly (within polling interval + small buffer)
+    await expect(page.locator('[data-status="completed"]')).toBeVisible({ timeout: 3000 });
+  });
+
+  test('should handle rapid form submissions correctly', async () => {
+    let submissionCount = 0;
+
+    await page.route('**/api/extraction-runs', async (route) => {
+      if (route.request().method() === 'POST') {
+        submissionCount++;
+        await route.fulfill({
+          status: 201,
+          body: JSON.stringify({ id: `run-${submissionCount}`, status: 'pending' }),
+        });
       }
     });
 
-    const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-    const submitButton = page.getByRole('button', { name: /extract action items/i });
+    // Submit multiple times rapidly
+    await page.fill('input[name="dataInput"]', 'test data 1');
+    await page.click('button[type="submit"]');
 
-    await notesInput.fill('Test meeting notes');
-    await submitButton.click();
+    await page.fill('input[name="dataInput"]', 'test data 2');
+    await page.click('button[type="submit"]');
 
-    // Wait for failure state
-    await expect(page.getByText(/failed|error/i)).toBeVisible({ timeout: 10000 });
+    await page.fill('input[name="dataInput"]', 'test data 3');
+    await page.click('button[type="submit"]');
 
-    const pollCountAtFailure = pollCount;
-
-    // Wait to verify polling stopped
-    await page.waitForTimeout(5000);
-
-    // Should not continue polling after failure
-    expect(pollCount).toBeLessThanOrEqual(pollCountAtFailure + 2);
+    // Should show latest submission
+    await page.waitForSelector('[data-run-id="run-3"]');
+    expect(submissionCount).toBe(3);
   });
 
-  test('should show real-time status updates', async ({ page }) => {
-    const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-    const submitButton = page.getByRole('button', { name: /extract action items/i });
+  test('should pause polling when page is hidden', async () => {
+    let pollingCount = 0;
 
-    await notesInput.fill('Test meeting notes with multiple action items for the team');
-    await submitButton.click();
-
-    // Should show processing immediately
-    await expect(page.getByText(/processing/i)).toBeVisible({ timeout: 5000 });
-
-    // Processing indicator should remain visible during extraction
-    const processingIndicator = page.getByText(/ai is analyzing/i);
-    await expect(processingIndicator).toBeVisible();
-
-    // Spinner should be animating
-    const spinner = page.locator('[class*="animate-spin"]');
-    await expect(spinner).toBeVisible();
-
-    // Eventually should transition to completed or failed
-    await expect(
-      page.getByText(/extraction complete/i).or(page.getByText(/extraction failed/i))
-    ).toBeVisible({ timeout: 45000 });
-  });
-
-  test('should display results when status changes to completed', async ({ page }) => {
-    const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-    const submitButton = page.getByRole('button', { name: /extract action items/i });
-
-    await notesInput.fill(`
-Team meeting notes
-Action items:
-1. John to review code by Friday
-2. Sarah to update documentation
-3. Mike to schedule follow-up meeting
-    `.trim());
-
-    await submitButton.click();
-
-    // Processing state
-    await expect(page.getByText(/processing/i)).toBeVisible({ timeout: 5000 });
-
-    // Wait for completion
-    await expect(page.getByText(/extraction complete/i)).toBeVisible({ timeout: 45000 });
-
-    // Results should now be visible
-    // Action items list should appear
-    const actionItems = page.locator('[data-testid="action-item"]');
-    const itemCount = await actionItems.count();
-    expect(itemCount).toBeGreaterThan(0);
-
-    // Model info should be displayed
-    await expect(page.getByText(/model:/i)).toBeVisible();
-  });
-
-  test('should handle polling with network delays gracefully', async ({ page }) => {
-    // Simulate slow network responses
-    await page.route('**/rest/v1/extraction_runs*', async (route, request) => {
-      // Add 500ms delay to simulate slow network
-      await new Promise(resolve => setTimeout(resolve, 500));
-      route.continue();
+    await page.route('**/api/extraction-runs/*', async (route) => {
+      if (route.request().method() === 'GET') {
+        pollingCount++;
+        await route.fulfill({
+          status: 200,
+          body: JSON.stringify({ id: '123', status: 'processing' }),
+        });
+      }
     });
 
-    const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-    const submitButton = page.getByRole('button', { name: /extract action items/i });
+    await page.fill('input[name="dataInput"]', 'test data');
+    await page.click('button[type="submit"]');
 
-    await notesInput.fill('Test meeting notes');
-    await submitButton.click();
+    await page.waitForTimeout(3000);
+    const countBeforeHide = pollingCount;
 
-    // Should still show processing despite delays
-    await expect(page.getByText(/processing/i)).toBeVisible({ timeout: 5000 });
-
-    // Should eventually complete
-    await expect(
-      page.getByText(/extraction complete/i).or(page.getByText(/failed/i))
-    ).toBeVisible({ timeout: 50000 });
-  });
-
-  test('should maintain UI state during polling', async ({ page }) => {
-    const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-    const submitButton = page.getByRole('button', { name: /extract action items/i });
-
-    await notesInput.fill('Test meeting notes for UI state test');
-    await submitButton.click();
-
-    await expect(page.getByText(/processing/i)).toBeVisible({ timeout: 5000 });
-
-    // During polling, UI should remain stable
-    // Input should stay disabled
-    await expect(notesInput).toBeDisabled();
-
-    // Submit button should stay disabled
-    await expect(submitButton).toBeDisabled();
-
-    // Processing message should remain visible
-    await expect(page.getByText(/ai is analyzing/i)).toBeVisible();
-
-    // No flickering or state resets
-    await page.waitForTimeout(5000);
-    await expect(page.getByText(/processing/i)).toBeVisible();
-  });
-
-  test('should update UI immediately when poll detects status change', async ({ page }) => {
-    const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-    const submitButton = page.getByRole('button', { name: /extract action items/i });
-
-    await notesInput.fill('Quick test notes');
-    await submitButton.click();
-
-    await expect(page.getByText(/processing/i)).toBeVisible({ timeout: 5000 });
-
-    // When status changes, UI should update within 2 seconds (one poll interval)
-    const startTime = Date.now();
-    await expect(
-      page.getByText(/extraction complete/i).or(page.getByText(/extraction failed/i))
-    ).toBeVisible({ timeout: 45000 });
-    const endTime = Date.now();
-
-    // Should detect completion within reasonable time
-    const detectionTime = endTime - startTime;
-    expect(detectionTime).toBeLessThan(50000); // 50 seconds max
-  });
-
-  test('should show extraction run metadata', async ({ page }) => {
-    const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-    const submitButton = page.getByRole('button', { name: /extract action items/i });
-
-    await notesInput.fill('Test meeting notes');
-    await submitButton.click();
-
-    await expect(page.getByText(/extraction complete/i)).toBeVisible({ timeout: 45000 });
-
-    // Should display model provider and name
-    await expect(page.getByText(/model:/i)).toBeVisible();
-
-    // Should contain provider information (bedrock or azure)
-    const modelText = await page.getByText(/model:/i).textContent();
-    expect(modelText?.toLowerCase()).toMatch(/bedrock|azure/);
-  });
-
-  test('should handle rapid successive submissions', async ({ page }) => {
-    const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-    const submitButton = page.getByRole('button', { name: /extract action items/i });
-
-    // First submission
-    await notesInput.fill('First meeting notes');
-    await submitButton.click();
-
-    await expect(page.getByText(/processing/i)).toBeVisible({ timeout: 5000 });
-
-    // Try to submit again (should see "New Extraction" button or wait)
-    // This tests that the UI properly handles state management
-    const isProcessing = await page.getByText(/processing/i).isVisible();
-    expect(isProcessing).toBe(true);
-
-    // Input and submit should be disabled during processing
-    await expect(notesInput).toBeDisabled();
-    await expect(submitButton).toBeDisabled();
-  });
-
-  test('should resume polling after page visibility change', async ({ page, context }) => {
-    // Note: This test simulates tab switching behavior
-    const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
-    const submitButton = page.getByRole('button', { name: /extract action items/i });
-
-    await notesInput.fill('Test meeting notes');
-    await submitButton.click();
-
-    await expect(page.getByText(/processing/i)).toBeVisible({ timeout: 5000 });
-
-    // Simulate tab becoming hidden
+    // Simulate page visibility change
     await page.evaluate(() => {
-      Object.defineProperty(document, 'hidden', {
+      Object.defineProperty(document, 'visibilityState', {
         writable: true,
-        configurable: true,
-        value: true
+        value: 'hidden',
+      });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+
+    await page.waitForTimeout(5000);
+    const countDuringHide = pollingCount;
+
+    // Polling should have stopped or slowed significantly
+    expect(countDuringHide - countBeforeHide).toBeLessThan(2);
+
+    // Resume polling when visible again
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', {
+        writable: true,
+        value: 'visible',
       });
       document.dispatchEvent(new Event('visibilitychange'));
     });
 
     await page.waitForTimeout(3000);
+    const countAfterResume = pollingCount;
 
-    // Simulate tab becoming visible again
-    await page.evaluate(() => {
-      Object.defineProperty(document, 'hidden', {
-        writable: true,
-        configurable: true,
-        value: false
-      });
-      document.dispatchEvent(new Event('visibilitychange'));
+    // Polling should resume
+    expect(countAfterResume).toBeGreaterThan(countDuringHide);
+  });
+
+  test('should handle server errors during polling', async () => {
+    let attemptCount = 0;
+
+    await page.route('**/api/extraction-runs/*', async (route) => {
+      attemptCount++;
+      if (attemptCount < 3) {
+        await route.fulfill({ status: 500, body: 'Server error' });
+      } else {
+        await route.fulfill({
+          status: 200,
+          body: JSON.stringify({ id: '123', status: 'processing' }),
+        });
+      }
     });
 
-    // TanStack Query should resume polling
-    // Processing status should still be visible or transition to complete
-    await expect(
-      page.getByText(/processing|extraction complete/i)
-    ).toBeVisible({ timeout: 5000 });
+    await page.fill('input[name="dataInput"]', 'test data');
+    await page.click('button[type="submit"]');
+
+    // Should eventually succeed after retries
+    await page.waitForSelector('[data-status="processing"]', { timeout: 10000 });
+    expect(attemptCount).toBeGreaterThanOrEqual(3);
+  });
+
+  test('should clean up polling intervals on unmount', async () => {
+    await page.route('**/api/extraction-runs/*', async (route) => {
+      if (route.request().method() === 'GET') {
+        await route.fulfill({
+          status: 200,
+          body: JSON.stringify({ id: '123', status: 'processing' }),
+        });
+      }
+    });
+
+    await page.route('**/api/extraction-runs', async (route) => {
+      if (route.request().method() === 'POST') {
+        await route.fulfill({
+          status: 201,
+          body: JSON.stringify({ id: '123', status: 'pending' }),
+        });
+      }
+    });
+
+    // Start extraction to begin polling
+    await page.fill('input[name="dataInput"]', 'test data');
+    await page.click('button[type="submit"]');
+
+    // Wait for polling to start
+    await page.waitForSelector('[data-status="processing"]');
+    await page.waitForTimeout(3000);
+
+    // Track active intervals before unmount
+    const intervalsBefore = await page.evaluate(() => {
+      return (window as any).__activeIntervals?.size || 0;
+    });
+
+    // Navigate away (unmount component)
+    await page.goto('/about');
+    await page.waitForTimeout(1000);
+
+    // Navigate back and check intervals were cleaned up
+    await page.goto('/');
+    await page.waitForTimeout(1000);
+
+    const intervalsAfter = await page.evaluate(() => {
+      return (window as any).__activeIntervals?.size || 0;
+    });
+
+    // Should have cleaned up intervals from previous mount
+    expect(intervalsAfter).toBe(0);
+  });
+
+  test('should not accumulate intervals on multiple submissions', async () => {
+    let submissionId = 0;
+
+    await page.route('**/api/extraction-runs', async (route) => {
+      if (route.request().method() === 'POST') {
+        submissionId++;
+        await route.fulfill({
+          status: 201,
+          body: JSON.stringify({ id: `run-${submissionId}`, status: 'pending' }),
+        });
+      }
+    });
+
+    await page.route('**/api/extraction-runs/*', async (route) => {
+      if (route.request().method() === 'GET') {
+        await route.fulfill({
+          status: 200,
+          body: JSON.stringify({ id: '123', status: 'processing' }),
+        });
+      }
+    });
+
+    // Submit multiple times rapidly
+    for (let i = 0; i < 5; i++) {
+      await page.fill('input[name="dataInput"]', `test data ${i}`);
+      await page.click('button[type="submit"]');
+      await page.waitForTimeout(1000);
+    }
+
+    // Wait for polling to be active
+    await page.waitForTimeout(2000);
+
+    // Track number of polling requests in a window
+    let pollingCount = 0;
+    page.on('request', (request) => {
+      if (request.url().includes('/api/extraction-runs/') && request.method() === 'GET') {
+        pollingCount++;
+      }
+    });
+
+    await page.waitForTimeout(5000);
+
+    // Should only have 1 active polling interval (not 5)
+    // With 5 intervals at 2s each, we'd expect ~12-13 requests in 5s
+    // With 1 interval, we expect ~2-3 requests
+    expect(pollingCount).toBeLessThanOrEqual(4);
+  });
+
+  test('should stop all polling intervals when final status is reached', async () => {
+    let callCount = 0;
+
+    await page.route('**/api/extraction-runs/*', async (route) => {
+      if (route.request().method() === 'GET') {
+        callCount++;
+        const status = callCount < 3 ? 'processing' : 'completed';
+        await route.fulfill({
+          status: 200,
+          body: JSON.stringify({ id: '123', status }),
+        });
+      }
+    });
+
+    await page.route('**/api/extraction-runs', async (route) => {
+      if (route.request().method() === 'POST') {
+        await route.fulfill({
+          status: 201,
+          body: JSON.stringify({ id: '123', status: 'pending' }),
+        });
+      }
+    });
+
+    await page.fill('input[name="dataInput"]', 'test data');
+    await page.click('button[type="submit"]');
+
+    // Wait for completion
+    await expect(page.locator('[data-status="completed"]')).toBeVisible({ timeout: 10000 });
+
+    const callsBeforeWait = callCount;
+    await page.waitForTimeout(6000);
+    const callsAfterWait = callCount;
+
+    // No new polling requests should occur after completion
+    expect(callsAfterWait).toBe(callsBeforeWait);
+
+    // Verify no intervals are still active
+    const activeIntervals = await page.evaluate(() => {
+      return (window as any).__activeIntervals?.size || 0;
+    });
+    expect(activeIntervals).toBe(0);
   });
 });

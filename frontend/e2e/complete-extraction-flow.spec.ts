@@ -67,14 +67,33 @@ Action Items:
     const actionItems = page.locator('[data-testid="action-item"]');
     await expect(actionItems).toHaveCount(3, { timeout: 5000 });
 
-    // 9. Verify action item structure
-    const firstItem = actionItems.first();
-    await expect(firstItem).toContainText(/follow up|budget/i);
+    // 9. Verify action item structure with exact data matches
+    // Store expected data and verify exact matches
+    const expectedActions = [
+      { description: 'follow up with Sarah on Q4 budget', owner: 'John', dueDate: 'July 15' },
+      { description: 'review the architectural design doc', owner: 'Mike', dueDate: 'next week' },
+      { description: 'schedule a meeting with design team', owner: 'Sarah', dueDate: 'ASAP' }
+    ];
 
-    // Check for owner, due date, confidence
-    await expect(firstItem).toContainText(/owner|John|Sarah|Mike/i);
-    await expect(firstItem).toContainText(/due date|no due date/i);
-    await expect(firstItem).toContainText(/confidence|\d+%/i);
+    for (const [index, expected] of expectedActions.entries()) {
+      const item = actionItems.nth(index);
+      // Verify description contains key terms (AI may reword slightly)
+      const description = expected.description.split(' ');
+      for (const term of description) {
+        if (term.length > 3) { // Check meaningful words
+          await expect(item).toContainText(new RegExp(term, 'i'));
+        }
+      }
+
+      // Verify exact owner match
+      await expect(item).toContainText(expected.owner);
+
+      // Verify due date is present
+      await expect(item).toContainText(new RegExp(expected.dueDate, 'i'));
+
+      // Verify confidence is present
+      await expect(item).toContainText(/confidence|\d+%/i);
+    }
 
     // 10. Verify "New Extraction" button appears
     const newExtractionButton = page.getByRole('button', { name: /new extraction/i });
@@ -215,5 +234,48 @@ Action items:
 
     // Should contain provider name
     await expect(modelInfo).toContainText(/bedrock|azure/i);
+  });
+
+  test('should handle user navigating away during processing', async ({ page }) => {
+    await page.goto('/meeting-notes');
+
+    const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
+    const submitButton = page.getByRole('button', { name: /extract action items/i });
+
+    await notesInput.fill(TEST_NOTES);
+    await submitButton.click();
+
+    // Wait for processing to start
+    await expect(page.getByText(/processing/i)).toBeVisible();
+
+    // Navigate away
+    await page.goto('/about');
+    await page.waitForTimeout(2000);
+
+    // Navigate back
+    await page.goto('/meeting-notes');
+
+    // Should show way to check status or resume
+    await expect(page.getByText(/recent extractions|check status/i)).toBeVisible();
+  });
+
+  test('should handle page refresh during processing', async ({ page }) => {
+    await page.goto('/meeting-notes');
+
+    await page.getByPlaceholder(/paste your meeting notes/i).fill(TEST_NOTES);
+    await page.getByRole('button', { name: /extract action items/i }).click();
+
+    await expect(page.getByText(/processing/i)).toBeVisible();
+
+    // Get extraction ID from URL or localStorage
+    const extractionId = await page.evaluate(() => localStorage.getItem('currentExtractionId'));
+
+    // Refresh page
+    await page.reload();
+
+    // Should restore state
+    if (extractionId) {
+      await expect(page.getByText(/processing|extraction complete/i)).toBeVisible({ timeout: 60000 });
+    }
   });
 });

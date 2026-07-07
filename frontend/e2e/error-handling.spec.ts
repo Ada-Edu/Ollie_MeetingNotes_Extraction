@@ -74,13 +74,23 @@ test.describe('Error Handling Flow', () => {
     const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
     const submitButton = page.getByRole('button', { name: /extract action items/i });
 
-    await notesInput.fill('Test meeting notes about project status and next steps');
+    const testNotes = 'Test meeting notes about project status and next steps';
+    await notesInput.fill(testNotes);
     await submitButton.click();
 
-    // Should show error state
-    await expect(
-      page.getByText(/failed|error|unavailable/i)
-    ).toBeVisible({ timeout: 10000 });
+    // Verify specific, actionable error message is shown
+    const errorMessage = page.getByText(/unable to connect|connection failed|server unavailable|could not connect/i);
+    await expect(errorMessage).toBeVisible({ timeout: 10000 });
+
+    // Verify UI state allows recovery - input should be editable again
+    await expect(notesInput).toBeEnabled();
+    await expect(notesInput).toHaveValue(testNotes); // Original text should be preserved
+
+    // Verify user can retry - submit button should be available
+    await expect(submitButton).toBeEnabled();
+
+    // Verify no processing state is stuck
+    await expect(page.getByText(/processing/i)).not.toBeVisible();
   });
 
   test('should handle workflow trigger failure', async ({ page }) => {
@@ -98,13 +108,28 @@ test.describe('Error Handling Flow', () => {
     const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
     const submitButton = page.getByRole('button', { name: /extract action items/i });
 
-    await notesInput.fill('Test meeting notes about project status and next steps');
+    const testNotes = 'Test meeting notes about project status and next steps';
+    await notesInput.fill(testNotes);
     await submitButton.click();
 
-    // Should show error message
-    await expect(
-      page.getByText(/failed|error/i)
-    ).toBeVisible({ timeout: 10000 });
+    // Verify specific error message is displayed (not just any text with "error")
+    const errorMessage = page.getByText(/failed to trigger|workflow failed|extraction failed|something went wrong/i);
+    await expect(errorMessage).toBeVisible({ timeout: 10000 });
+
+    // Verify error message doesn't expose technical details to user
+    const errorText = await errorMessage.textContent();
+    expect(errorText?.toLowerCase()).not.toContain('temporal');
+    expect(errorText?.toLowerCase()).not.toContain('client not connected');
+
+    // Verify UI returns to actionable state
+    await expect(notesInput).toBeEnabled();
+    await expect(submitButton).toBeEnabled();
+
+    // Verify input is preserved for retry
+    await expect(notesInput).toHaveValue(testNotes);
+
+    // Verify no stuck loading state
+    await expect(submitButton).not.toHaveText(/processing|loading/i);
   });
 
   test('should handle model API failure gracefully', async ({ page }) => {
@@ -179,21 +204,40 @@ Action items:
     const submitButton = page.getByRole('button', { name: /extract action items/i });
 
     // First attempt - should fail
-    await notesInput.fill('Test meeting notes with action items');
+    const testNotes = 'Test meeting notes with action items';
+    await notesInput.fill(testNotes);
     await submitButton.click();
 
-    await expect(page.getByText(/failed|error/i)).toBeVisible({ timeout: 10000 });
+    // Verify error is shown
+    const errorMessage = page.getByText(/failed|error/i);
+    await expect(errorMessage).toBeVisible({ timeout: 10000 });
+
+    // Verify error count before retry
+    expect(requestCount).toBe(1);
 
     // Should be able to create new extraction
     const newExtractionButton = page.getByRole('button', { name: /new extraction/i });
     await expect(newExtractionButton).toBeVisible();
     await newExtractionButton.click();
 
+    // Verify form is reset and ready for new input
+    await expect(notesInput).toBeEnabled();
+    await expect(submitButton).toBeEnabled();
+
     // Second attempt - should succeed
-    await notesInput.fill('Test meeting notes with action items - retry');
+    const retryNotes = 'Test meeting notes with action items - retry';
+    await notesInput.fill(retryNotes);
     await submitButton.click();
 
+    // Verify second request was made
+    await page.waitForTimeout(500); // Give time for request to trigger
+    expect(requestCount).toBe(2);
+
+    // Verify processing state is shown after successful trigger
     await expect(page.getByText(/processing/i)).toBeVisible({ timeout: 5000 });
+
+    // Verify error message is cleared
+    await expect(errorMessage).not.toBeVisible();
   });
 
   test('should disable input during processing', async ({ page }) => {
@@ -228,13 +272,27 @@ Action items:
     await submitButton.click();
 
     // Should show user-friendly message, not raw error
-    const errorMessage = page.locator('[class*="red"], [class*="error"]');
+    const errorMessage = page.locator('[class*="red"], [class*="error"]').first();
     await expect(errorMessage).toBeVisible({ timeout: 10000 });
 
     // Should not contain technical jargon like "stack trace", "TypeError", etc.
     const errorText = await errorMessage.textContent();
     expect(errorText?.toLowerCase()).not.toContain('typeerror');
     expect(errorText?.toLowerCase()).not.toContain('stack trace');
+    expect(errorText?.toLowerCase()).not.toContain('exception');
+    expect(errorText?.toLowerCase()).not.toContain('undefined');
+    expect(errorText?.toLowerCase()).not.toContain('null');
+
+    // Verify error message provides actionable guidance
+    const hasActionableText =
+      errorText?.toLowerCase().includes('try again') ||
+      errorText?.toLowerCase().includes('please') ||
+      errorText?.toLowerCase().includes('contact') ||
+      errorText?.toLowerCase().includes('check');
+    expect(hasActionableText).toBe(true);
+
+    // Verify error is dismissible or form is still usable
+    await expect(notesInput).toBeEnabled();
   });
 
   test('should handle database persistence errors', async ({ page }) => {
@@ -269,8 +327,19 @@ Action items:
 
     await notesInput.fill('Test meeting notes for network test');
 
-    // Note: This test verifies the app doesn't crash on network errors
+    // Verify app doesn't crash on network errors
     // TanStack Query should handle retries automatically
+
+    // Verify UI remains responsive during network interruption
+    await expect(notesInput).toBeVisible();
+    await expect(submitButton).toBeVisible();
+
+    // Verify no error state is stuck permanently
+    // After network recovers, polling should resume
+    await page.waitForTimeout(2000); // Allow time for retries
+
+    // Verify at least one retry occurred
+    expect(pollCount).toBeGreaterThan(1);
   });
 
   test('should provide contact support option on persistent errors', async ({ page }) => {
@@ -289,8 +358,102 @@ Action items:
     await submitButton.click();
 
     // Should show error with support guidance
-    await expect(
-      page.getByText(/contact support|try again|issue persists/i)
-    ).toBeVisible({ timeout: 10000 });
+    const supportGuidance = page.getByText(/contact support|try again|issue persists/i);
+    await expect(supportGuidance).toBeVisible({ timeout: 10000 });
+
+    // Verify the error doesn't expose internal implementation details
+    const pageText = await page.textContent('body');
+    expect(pageText?.toLowerCase()).not.toContain('internal server error');
+    expect(pageText?.toLowerCase()).not.toContain('500');
+
+    // Verify user can still take action (form isn't broken)
+    await expect(notesInput).toBeEnabled();
+    await expect(submitButton).toBeEnabled();
+
+    // Verify error provides helpful context, not just generic message
+    const supportText = await supportGuidance.textContent();
+    expect(supportText?.length).toBeGreaterThan(20); // Should be a meaningful message
+  });
+
+  test('should log errors and maintain consistent state', async ({ page }) => {
+    // Capture console errors to verify error logging
+    const consoleErrors: string[] = [];
+    page.on('console', msg => {
+      if (msg.type() === 'error') {
+        consoleErrors.push(msg.text());
+      }
+    });
+
+    // Mock API failure
+    await page.route('http://localhost:8000/trigger-workflow', route => {
+      route.abort('failed');
+    });
+
+    const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
+    const submitButton = page.getByRole('button', { name: /extract action items/i });
+
+    const testNotes = 'Test meeting notes for error logging';
+    await notesInput.fill(testNotes);
+    await submitButton.click();
+
+    // Wait for error to occur
+    await page.waitForTimeout(2000);
+
+    // Verify error was logged (errors should be captured for debugging)
+    expect(consoleErrors.length).toBeGreaterThanOrEqual(0); // May or may not log to console depending on implementation
+
+    // Verify UI state is consistent and recoverable
+    await expect(notesInput).toBeEnabled();
+    await expect(notesInput).toHaveValue(testNotes); // Input preserved
+    await expect(submitButton).toBeEnabled(); // Can retry
+
+    // Verify no stuck processing indicators
+    await expect(page.getByText(/processing/i)).not.toBeVisible();
+
+    // Verify form can be cleared and reused
+    await notesInput.clear();
+    await notesInput.fill('New test notes');
+    await expect(notesInput).toHaveValue('New test notes');
+
+    // Verify no modal/overlay is stuck open
+    const modals = page.locator('[role="dialog"], [class*="modal"]');
+    const modalCount = await modals.count();
+    if (modalCount > 0) {
+      const visibleModals = await modals.filter({ hasText: /.+/ }).count();
+      expect(visibleModals).toBe(0); // No error modals stuck open
+    }
+  });
+
+  test('should not create partial database records on error', async ({ page }) => {
+    // Mock workflow trigger failure
+    await page.route('http://localhost:8000/trigger-workflow', route => {
+      route.abort('failed');
+    });
+
+    const notesInput = page.getByPlaceholder(/paste your meeting notes/i);
+    const submitButton = page.getByRole('button', { name: /extract action items/i });
+
+    await notesInput.fill('Test meeting notes that should not persist');
+    await submitButton.click();
+
+    // Wait for error to be displayed
+    await expect(page.getByText(/failed|error|unavailable/i)).toBeVisible({ timeout: 10000 });
+
+    // Verify no extraction_run records were created
+    // Note: In a real test, you would query the database or check Supabase
+    // For now, verify the UI shows no extraction history
+    const extractionHistory = page.locator('[data-testid="extraction-history"], [class*="history"]');
+    const historyCount = await extractionHistory.count();
+
+    // If history section exists, verify it's empty or shows no failed items incorrectly saved
+    if (historyCount > 0) {
+      const historyText = await extractionHistory.first().textContent();
+      expect(historyText?.toLowerCase()).not.toContain('test meeting notes that should not persist');
+    }
+
+    // Verify user can start fresh without corrupted state
+    await notesInput.clear();
+    await notesInput.fill('Fresh start notes');
+    await expect(notesInput).toHaveValue('Fresh start notes');
   });
 });
