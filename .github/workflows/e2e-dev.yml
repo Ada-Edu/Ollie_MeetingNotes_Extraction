@@ -5,8 +5,8 @@ name: E2E (dev environment)
 # deduplicated incident so the factory can pick it up.
 
 on:
-  schedule:
-    - cron: '17 * * * *'   # hourly (off the :00 mark)
+  # schedule:
+  #   - cron: '17 * * * *'   # hourly (off the :00 mark)
   workflow_dispatch:
   workflow_run:
     workflows: ["Deploy Dev"]
