@@ -4,7 +4,7 @@
 > run regenerates this branch. The machine-readable source of truth is [`runs.jsonl`](./runs.jsonl).
 > Deployed-environment E2E trends live separately on the [`e2e-history`](../../tree/e2e-history) branch.
 
-**Last updated:** — · 2 records · suites: `helm`, `seed`
+**Last updated:** — · 4 records · suites: `helm`, `seed`
 
 ![trend](./trend.svg)
 
@@ -12,14 +12,16 @@
 
 | Suite | Latest | When (UTC) | Pass 24h | Pass 7d | Green streak | Runs |
 |---|---|---|--:|--:|--:|--:|
-| `helm` | ❌ `failed` [↗](https://github.com/Ada-Edu/Ollie_MeetingNotes_Extraction/actions/runs/28873172658) | — | — | — | 0 | 1 |
-| `seed` | ❌ `failed` [↗](https://github.com/Ada-Edu/Ollie_MeetingNotes_Extraction/actions/runs/28873172658) | — | — | — | 0 | 1 |
+| `helm` | ❌ `failed` [↗](https://github.com/Ada-Edu/Ollie_MeetingNotes_Extraction/actions/runs/29718446048) | — | — | — | 0 | 2 |
+| `seed` | ❌ `failed` [↗](https://github.com/Ada-Edu/Ollie_MeetingNotes_Extraction/actions/runs/29718446048) | — | — | — | 0 | 2 |
 
 
 ## Recent runs
 
 | When (UTC) | Suite | Result | Pass | Fail | Skip | Duration | Commit | Run |
 |---|---|---|--:|--:|--:|--:|---|---|
+| — | `seed` | ❌ failed | 0 | 1 | 0 | — | `585ee6b` | [#20](https://github.com/Ada-Edu/Ollie_MeetingNotes_Extraction/actions/runs/29718446048) |
+| — | `helm` | ❌ failed | 151 | 2 | 0 | — | `585ee6b` | [#20](https://github.com/Ada-Edu/Ollie_MeetingNotes_Extraction/actions/runs/29718446048) |
 | — | `seed` | ❌ failed | 0 | 1 | 0 | — | `1ebc78e` | [#1](https://github.com/Ada-Edu/Ollie_MeetingNotes_Extraction/actions/runs/28873172658) |
 | — | `helm` | ❌ failed | 151 | 2 | 0 | — | `1ebc78e` | [#1](https://github.com/Ada-Edu/Ollie_MeetingNotes_Extraction/actions/runs/28873172658) |
 
