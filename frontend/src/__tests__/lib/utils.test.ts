@@ -84,16 +84,14 @@ describe('cn utility', () => {
 
     it('should handle directional padding overrides', () => {
       const result = cn('p-4', 'px-8');
-      expect(result).toContain('py-4');
-      expect(result).toContain('px-8');
+      // tailwind-merge keeps both when specificity differs
+      expect(result).toBe('p-4 px-8');
     });
 
     it('should handle specific directional overrides', () => {
       const result = cn('p-4', 'pt-8');
-      expect(result).toContain('pb-4');
-      expect(result).toContain('pl-4');
-      expect(result).toContain('pr-4');
-      expect(result).toContain('pt-8');
+      // tailwind-merge keeps both when specificity differs
+      expect(result).toBe('p-4 pt-8');
     });
   });
 

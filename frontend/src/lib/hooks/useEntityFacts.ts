@@ -2,7 +2,6 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../supabase';
 import type { Database } from '../supabase';
 
-type EntityFact = Database['public']['Tables']['entity_facts']['Row'];
 type EntityFactInsert = Database['public']['Tables']['entity_facts']['Insert'];
 
 // Query key factory

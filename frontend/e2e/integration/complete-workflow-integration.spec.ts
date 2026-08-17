@@ -1,360 +1,210 @@
-/**
- * Complete frontend-backend integration tests using Playwright E2E.
- * Tests the full workflow from frontend through API to Temporal and back.
- *
- * @group e2e-integration
- */
-
 import { test, expect } from '@playwright/test';
+import { Page } from '@playwright/test';
+import { createClient } from '@supabase/supabase-js';
 
-test.describe('Complete Frontend-Backend Integration', () => {
-  test.beforeEach(async ({ page }) => {
-    // Navigate to the app
-    await page.goto('http://localhost:5173');
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+const SUPABASE_URL = process.env.VITE_SUPABASE_URL || 'http://localhost:54321';
+const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0';
+
+// Initialize Supabase client for database verification
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+test.describe('Complete Workflow Integration Tests - Real Backend', () => {
+  let page: Page;
+
+  test.beforeEach(async ({ browser }) => {
+    page = await browser.newPage();
+    await page.goto(FRONTEND_URL);
   });
 
-  test('should complete full workflow from frontend to backend and show results', async ({
-    page,
-  }) => {
-    // Step 1: Enter meeting notes in frontend
+  test.afterEach(async () => {
+    await page.close();
+  });
+
+  test('Real workflow integration - frontend to backend to database', async () => {
+    // Navigate to extraction page
+    await page.goto(`${FRONTEND_URL}/extraction`);
+
+    // Fill in meeting notes with real data
     const meetingNotes = `
-      Team Meeting - July 7, 2026
-
-      Attendees: Alice, Bob, Carol
-
-      Action Items:
-      1. Alice to review Q3 budget proposal by July 15th
-      2. Bob will update the project timeline and share with team
-      3. Carol to schedule follow-up meeting with stakeholders by end of week
+      Team meeting on January 15, 2026.
+      Action: John needs to complete the project proposal by January 20, 2026.
+      Action: Sarah will review the design documents by January 18, 2026.
     `;
 
-    await page.fill('textarea[name="notes"]', meetingNotes);
-
-    // Step 2: Submit the form
+    // NO MOCKING - Submit to real backend
+    await page.fill('textarea[name="meetingNotes"]', meetingNotes);
     await page.click('button[type="submit"]');
 
-    // Step 3: Verify loading state appears
-    await expect(page.locator('text=/Processing|Extracting/i')).toBeVisible({
-      timeout: 3000,
-    });
+    // Wait for REAL workflow to complete (actual AI processing)
+    await expect(page.locator('text=Processing')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('text=Extraction Complete')).toBeVisible({ timeout: 60000 });
 
-    // Step 4: Wait for workflow to complete and results to appear
-    // This tests the polling mechanism
-    await expect(page.locator('text=/Action Items|Results/i')).toBeVisible({
-      timeout: 30000, // Give Temporal workflow time to complete
-    });
+    // Verify UI shows extracted action items
+    await expect(page.locator('text=John')).toBeVisible();
+    await expect(page.locator('text=Sarah')).toBeVisible();
 
-    // Step 5: Verify action items are displayed
-    const actionItems = page.locator('[data-testid="action-item"]');
-    await expect(actionItems).toHaveCount(3, { timeout: 5000 });
+    // CRITICAL: Verify in ACTUAL database that workflow completed
+    const { data: extractionRuns, error } = await supabase
+      .from('extraction_runs')
+      .select('*, action_items(*)')
+      .eq('status', 'completed')
+      .order('created_at', { ascending: false })
+      .limit(1);
 
-    // Step 6: Verify specific action item content
-    await expect(page.locator('text=/Alice.*budget/i')).toBeVisible();
-    await expect(page.locator('text=/Bob.*timeline/i')).toBeVisible();
-    await expect(page.locator('text=/Carol.*meeting/i')).toBeVisible();
+    expect(error).toBeNull();
+    expect(extractionRuns).toBeTruthy();
+    expect(extractionRuns!.length).toBeGreaterThan(0);
 
-    // Step 7: Verify owners are extracted
-    await expect(page.locator('text=/Alice/i')).toBeVisible();
-    await expect(page.locator('text=/Bob/i')).toBeVisible();
-    await expect(page.locator('text=/Carol/i')).toBeVisible();
+    const latestRun = extractionRuns![0];
+    expect(latestRun.status).toBe('completed');
+    expect(latestRun.action_items).toBeTruthy();
+    expect(latestRun.action_items.length).toBeGreaterThan(0);
 
-    // Step 8: Verify due dates are shown
-    await expect(page.locator('text=/July 15|2026-07-15/i')).toBeVisible();
-    await expect(page.locator('text=/end of week/i')).toBeVisible();
+    // Verify action items actually saved to database
+    const actionItems = latestRun.action_items;
+    expect(actionItems.some((item: any) => item.description.toLowerCase().includes('proposal'))).toBeTruthy();
+    expect(actionItems.some((item: any) => item.owner && item.owner.toLowerCase().includes('john'))).toBeTruthy();
   });
 
-  test('should handle workflow failure gracefully', async ({ page }) => {
-    // Submit invalid/empty meeting notes
-    await page.fill('textarea[name="notes"]', 'Too short');
+  test('Database persistence - verify extraction run saved correctly', async () => {
+    await page.goto(`${FRONTEND_URL}/extraction`);
 
-    await page.click('button[type="submit"]');
-
-    // Should show error message
-    await expect(
-      page.locator('text=/Error|Failed|too short/i')
-    ).toBeVisible({ timeout: 10000 });
-
-    // Should not show action items
-    await expect(page.locator('[data-testid="action-item"]')).not.toBeVisible();
-  });
-
-  test('should poll for status updates during processing', async ({ page }) => {
-    const meetingNotes = 'Team meeting: Alice to review documentation by next week';
-
-    await page.fill('textarea[name="notes"]', meetingNotes);
-    await page.click('button[type="submit"]');
-
-    // Verify initial processing state
-    await expect(page.locator('text=/Processing/i')).toBeVisible();
-
-    // Monitor for status changes (polling should happen every 2 seconds)
-    let statusChanges = 0;
-    const statusElement = page.locator('[data-testid="extraction-status"]');
-
-    // Wait and check that status updates occur
-    await page.waitForTimeout(2500); // Wait for at least one poll
-
-    // Eventually should show completed
-    await expect(page.locator('text=/Completed|Success/i')).toBeVisible({
-      timeout: 30000,
-    });
-  });
-
-  test('should display multiple action items with correct details', async ({
-    page,
-  }) => {
     const meetingNotes = `
-      Project Kickoff Meeting
-
-      1. John will create initial project plan by July 20th (HIGH PRIORITY)
-      2. Sarah needs to set up development environment
-      3. Mike to schedule weekly sync meetings starting next Monday
-      4. Lisa will prepare stakeholder presentation by July 18th
-      5. Team to review and approve architecture by July 25th
+      Sprint planning meeting - July 7, 2026.
+      Action: Mike to implement authentication by July 15.
+      Action: Lisa to write API documentation by July 20.
+      Action: Tom to set up CI/CD pipeline by July 10.
     `;
 
-    await page.fill('textarea[name="notes"]', meetingNotes);
+    // Submit without mocking
+    await page.fill('textarea[name="meetingNotes"]', meetingNotes);
     await page.click('button[type="submit"]');
 
-    // Wait for completion
-    await expect(page.locator('[data-testid="action-item"]')).toHaveCount(5, {
-      timeout: 30000,
-    });
+    await expect(page.locator('text=Extraction Complete')).toBeVisible({ timeout: 60000 });
 
-    // Verify each action item has required fields
-    const items = await page.locator('[data-testid="action-item"]').all();
+    // Query database to verify meeting notes were saved
+    const { data: meetingNotesRecords, error: notesError } = await supabase
+      .from('meeting_notes')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(1);
 
-    for (const item of items) {
-      // Each item should have description
-      await expect(item.locator('[data-testid="action-description"]')).toBeVisible();
+    expect(notesError).toBeNull();
+    expect(meetingNotesRecords).toBeTruthy();
+    expect(meetingNotesRecords!.length).toBe(1);
+    expect(meetingNotesRecords![0].notes_text).toContain('Sprint planning meeting');
 
-      // Owner might be present
-      const owner = item.locator('[data-testid="action-owner"]');
-      const ownerExists = await owner.count();
-      if (ownerExists > 0) {
-        await expect(owner).toBeVisible();
-      }
-    }
+    // Query database to verify extraction run completed
+    const { data: extractionRuns, error: runsError } = await supabase
+      .from('extraction_runs')
+      .select('*, action_items(*)')
+      .eq('meeting_notes_id', meetingNotesRecords![0].id);
+
+    expect(runsError).toBeNull();
+    expect(extractionRuns).toBeTruthy();
+    expect(extractionRuns!.length).toBeGreaterThan(0);
+    expect(extractionRuns![0].status).toBe('completed');
+    expect(extractionRuns![0].workflow_id).toBeTruthy();
+
+    // Verify action items persisted
+    expect(extractionRuns![0].action_items.length).toBeGreaterThan(0);
   });
 
-  test('should show extraction run metadata (model provider, model name)', async ({
-    page,
-  }) => {
-    const meetingNotes = 'Team meeting: Alice to complete task by Friday';
+  test('Multiple sequential workflow runs - no interference', async () => {
+    await page.goto(`${FRONTEND_URL}/extraction`);
 
-    await page.fill('textarea[name="notes"]', meetingNotes);
-    await page.click('button[type="submit"]');
-
-    // Wait for completion
-    await expect(page.locator('text=/Completed/i')).toBeVisible({
-      timeout: 30000,
-    });
-
-    // Check for model metadata
-    const metadataSection = page.locator('[data-testid="extraction-metadata"]');
-    if ((await metadataSection.count()) > 0) {
-      await expect(metadataSection).toContainText(/azure|bedrock/i);
-      await expect(metadataSection).toContainText(/gpt-4|claude/i);
-    }
-  });
-
-  test('should handle action items without owners or due dates', async ({
-    page,
-  }) => {
-    const meetingNotes = `
-      Quick standup notes:
-      - Update documentation
-      - Review pull requests
-      - Refactor authentication module
-    `;
-
-    await page.fill('textarea[name="notes"]', meetingNotes);
-    await page.click('button[type="submit"]');
-
-    await expect(page.locator('[data-testid="action-item"]')).toHaveCount(3, {
-      timeout: 30000,
-    });
-
-    // Should show "Unassigned" or similar for items without owner
-    await expect(page.locator('text=/Unassigned|No owner/i')).toBeVisible();
-
-    // Should show "No due date" or similar
-    await expect(page.locator('text=/No due date|No deadline/i')).toBeVisible();
-  });
-
-  test('should allow submitting another extraction after completion', async ({
-    page,
-  }) => {
     // First extraction
-    await page.fill('textarea[name="notes"]', 'First meeting: Alice to review docs');
+    await page.fill('textarea[name="meetingNotes"]', 'First meeting: Action: Alice to review code by Friday');
     await page.click('button[type="submit"]');
-    await expect(page.locator('text=/Completed/i')).toBeVisible({
-      timeout: 30000,
-    });
+    await expect(page.locator('text=Extraction Complete')).toBeVisible({ timeout: 60000 });
 
-    // Second extraction
-    await page.fill('textarea[name="notes"]', 'Second meeting: Bob to update code');
+    const { data: firstRun } = await supabase
+      .from('extraction_runs')
+      .select('id, status')
+      .eq('status', 'completed')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    expect(firstRun).toBeTruthy();
+    expect(firstRun!.status).toBe('completed');
+
+    // Second extraction - verify independent execution
+    await page.reload();
+    await page.fill('textarea[name="meetingNotes"]', 'Second meeting: Action: Bob to deploy app by Monday');
     await page.click('button[type="submit"]');
+    await expect(page.locator('text=Extraction Complete')).toBeVisible({ timeout: 60000 });
 
-    // Should process second extraction
-    await expect(page.locator('text=/Processing/i')).toBeVisible();
-    await expect(page.locator('text=/Completed/i')).toBeVisible({
-      timeout: 30000,
-    });
+    const { data: bothRuns } = await supabase
+      .from('extraction_runs')
+      .select('id, status')
+      .eq('status', 'completed')
+      .order('created_at', { ascending: false })
+      .limit(2);
 
-    // Should show new action items
-    await expect(page.locator('text=/Bob.*code/i')).toBeVisible();
+    expect(bothRuns).toBeTruthy();
+    expect(bothRuns!.length).toBe(2);
+    expect(bothRuns![0].id).not.toBe(bothRuns![1].id);
   });
 
-  test('should display confidence scores when available', async ({ page }) => {
-    const meetingNotes = `
-      Clear action items:
-      1. John Smith to submit quarterly report by July 31st, 2026
-      2. Review and approve budget proposal
+  test('Workflow with no action items - database reflects empty result', async () => {
+    await page.goto(`${FRONTEND_URL}/extraction`);
+
+    const noActionNotes = `
+      Team sync - July 7, 2026.
+      Discussed project status.
+      Everything is on track.
+      No specific actions needed.
     `;
 
-    await page.fill('textarea[name="notes"]', meetingNotes);
+    await page.fill('textarea[name="meetingNotes"]', noActionNotes);
     await page.click('button[type="submit"]');
 
-    await expect(page.locator('[data-testid="action-item"]')).toHaveCount(2, {
-      timeout: 30000,
-    });
+    await expect(page.locator('text=Extraction Complete')).toBeVisible({ timeout: 60000 });
 
-    // Check if confidence scores are displayed
-    const confidenceElements = page.locator('[data-testid="action-confidence"]');
-    const count = await confidenceElements.count();
+    // Verify extraction run completed but has no action items
+    const { data: extractionRuns } = await supabase
+      .from('extraction_runs')
+      .select('*, action_items(*)')
+      .eq('status', 'completed')
+      .order('created_at', { ascending: false })
+      .limit(1);
 
-    if (count > 0) {
-      // Verify confidence is between 0 and 1 or displayed as percentage
-      const confidenceText = await confidenceElements.first().textContent();
-      expect(confidenceText).toMatch(/\d+%|0\.\d+/);
-    }
-  });
-});
-
-test.describe('Frontend-Backend Error Handling Integration', () => {
-  test('should handle API connection errors', async ({ page }) => {
-    // Intercept and fail the API call
-    await page.route('**/trigger-workflow', (route) => {
-      route.abort('connectionrefused');
-    });
-
-    await page.goto('http://localhost:5173');
-    await page.fill('textarea[name="notes"]', 'Test meeting notes');
-    await page.click('button[type="submit"]');
-
-    // Should show connection error
-    await expect(
-      page.locator('text=/Connection|Network|Unable to connect/i')
-    ).toBeVisible({ timeout: 5000 });
+    expect(extractionRuns).toBeTruthy();
+    expect(extractionRuns![0].status).toBe('completed');
+    expect(extractionRuns![0].action_items.length).toBe(0);
   });
 
-  test('should handle workflow trigger failure', async ({ page }) => {
-    // Intercept and return error
-    await page.route('**/trigger-workflow', (route) => {
-      route.fulfill({
-        status: 500,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          detail: 'Temporal service unavailable',
-        }),
-      });
-    });
+  test('Action items with missing fields - database allows nulls', async () => {
+    await page.goto(`${FRONTEND_URL}/extraction`);
 
-    await page.goto('http://localhost:5173');
-    await page.fill('textarea[name="notes"]', 'Test meeting notes');
-    await page.click('button[type="submit"]');
-
-    // Should show error from API
-    await expect(page.locator('text=/Temporal|unavailable/i')).toBeVisible({
-      timeout: 5000,
-    });
-  });
-
-  test('should handle extraction run not found', async ({ page }) => {
-    await page.goto('http://localhost:5173');
-
-    // Try to navigate to non-existent extraction run
-    await page.goto('http://localhost:5173/extraction/non-existent-id');
-
-    // Should show not found or error message
-    await expect(
-      page.locator('text=/Not found|Error|Invalid/i')
-    ).toBeVisible();
-  });
-});
-
-test.describe('Performance and Reliability Integration', () => {
-  test('should handle slow API responses gracefully', async ({ page }) => {
-    // Add delay to API responses
-    await page.route('**/trigger-workflow', async (route) => {
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      await route.continue();
-    });
-
-    await page.goto('http://localhost:5173');
-    await page.fill('textarea[name="notes"]', 'Test meeting with slow API');
-    await page.click('button[type="submit"]');
-
-    // Should show loading state during delay
-    await expect(page.locator('text=/Processing|Loading/i')).toBeVisible();
-
-    // Should eventually complete
-    await expect(page.locator('text=/Completed|Success/i')).toBeVisible({
-      timeout: 40000,
-    });
-  });
-
-  test('should stop polling after workflow completes', async ({ page }) => {
-    const requestLog: string[] = [];
-
-    // Track polling requests
-    await page.route('**/extraction_runs**', (route) => {
-      requestLog.push(new Date().toISOString());
-      route.continue();
-    });
-
-    await page.goto('http://localhost:5173');
-    await page.fill('textarea[name="notes"]', 'Test polling behavior');
-    await page.click('button[type="submit"]');
-
-    // Wait for completion
-    await expect(page.locator('text=/Completed/i')).toBeVisible({
-      timeout: 30000,
-    });
-
-    const requestsBeforeComplete = requestLog.length;
-
-    // Wait additional time
-    await page.waitForTimeout(8000);
-
-    // Should not have made many more requests after completion
-    expect(requestLog.length - requestsBeforeComplete).toBeLessThan(3);
-  });
-
-  test('should handle large meeting notes', async ({ page }) => {
-    // Generate large meeting notes (but within 10000 char limit)
-    const largeNotes = `
-      Large Meeting Notes - Q3 Planning
-
-      ${Array.from({ length: 50 }, (_, i) => `
-      Action Item ${i + 1}: Team member ${i + 1} needs to complete task ${i + 1} by end of quarter.
-      This includes review, testing, and documentation.
-      `).join('\n')}
+    const partialActionNotes = `
+      Quick meeting notes.
+      - Review the design document (no owner mentioned)
+      - John will follow up (no due date given)
     `;
 
-    await page.goto('http://localhost:5173');
-    await page.fill('textarea[name="notes"]', largeNotes.substring(0, 9500));
+    await page.fill('textarea[name="meetingNotes"]', partialActionNotes);
     await page.click('button[type="submit"]');
 
-    // Should process successfully
-    await expect(page.locator('text=/Processing/i')).toBeVisible();
-    await expect(page.locator('text=/Completed/i')).toBeVisible({
-      timeout: 45000, // Longer timeout for large payload
-    });
+    await expect(page.locator('text=Extraction Complete')).toBeVisible({ timeout: 60000 });
 
-    // Should extract multiple action items
-    const items = await page.locator('[data-testid="action-item"]').count();
-    expect(items).toBeGreaterThan(10);
+    const { data: extractionRuns } = await supabase
+      .from('extraction_runs')
+      .select('*, action_items(*)')
+      .eq('status', 'completed')
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    expect(extractionRuns).toBeTruthy();
+    const actionItems = extractionRuns![0].action_items;
+    expect(actionItems.length).toBeGreaterThan(0);
+
+    // Verify some items may have null owner or null due_date
+    const hasNullOwner = actionItems.some((item: any) => item.owner === null);
+    const hasNullDueDate = actionItems.some((item: any) => item.due_date === null);
+
+    expect(hasNullOwner || hasNullDueDate).toBeTruthy();
   });
 });

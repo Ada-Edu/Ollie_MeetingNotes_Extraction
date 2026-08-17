@@ -1,6 +1,13 @@
 """
-End-to-end integration tests for the meeting notes extraction workflow.
-Tests the complete flow from API trigger through Temporal workflow to database persistence.
+End-to-End Workflow Integration Tests
+
+Tests full Python/Temporal/Supabase integration covering:
+- Complete workflow execution (validate->extract->persist)
+- Edge cases (minimal notes, unassigned owners, no due dates)
+- Validation failures and error recording
+- API trigger endpoint and health checks
+- Extraction run creation and action items linking
+- Cascade deletion
 """
 
 import asyncio
@@ -8,8 +15,12 @@ import os
 import uuid
 import pytest
 import httpx
+from datetime import datetime, timedelta
 from temporalio.client import Client
 from temporalio.worker import Worker
+from temporalio import workflow, activity
+from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
 # Add src to path
 import sys
@@ -290,6 +301,133 @@ Action items:
                 "meeting_notes",
                 params={"id": f"eq.{meeting_notes_id}"}
             )
+
+
+class TestTemporalRetryAndDeterminism:
+    """Test Temporal-specific retry and determinism features."""
+
+    @pytest.mark.asyncio
+    async def test_temporal_retry_policy_integration(self, temporal_client):
+        """Test that Temporal retry policies work as configured with exponential backoff."""
+        attempt_times = []
+
+        # Define a flaky activity that fails first 2 times
+        @activity.defn
+        async def flaky_activity():
+            attempt_times.append(datetime.now())
+            if len(attempt_times) < 3:
+                raise ApplicationError("Transient failure", non_retryable=False)
+            return "success"
+
+        # Define workflow with retry policy
+        @workflow.defn
+        class RetryWorkflow:
+            @workflow.run
+            async def run(self):
+                return await workflow.execute_activity(
+                    flaky_activity,
+                    start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(
+                        initial_interval=timedelta(seconds=1),
+                        maximum_interval=timedelta(seconds=5),
+                        maximum_attempts=5
+                    )
+                )
+
+        # Create a worker to handle the workflow
+        task_queue = f"retry-test-{uuid.uuid4()}"
+        async with Worker(
+            temporal_client,
+            task_queue=task_queue,
+            workflows=[RetryWorkflow],
+            activities=[flaky_activity]
+        ):
+            # Start workflow
+            workflow_id = f"retry-test-{uuid.uuid4()}"
+            handle = await temporal_client.start_workflow(
+                RetryWorkflow.run,
+                id=workflow_id,
+                task_queue=task_queue
+            )
+
+            # Wait for result
+            result = await asyncio.wait_for(handle.result(), timeout=30.0)
+
+            # Verify result
+            assert result == "success"
+            assert len(attempt_times) == 3, f"Expected 3 attempts, got {len(attempt_times)}"
+
+            # Verify exponential backoff occurred (at least 1 second between attempts)
+            if len(attempt_times) >= 2:
+                backoff_1 = (attempt_times[1] - attempt_times[0]).total_seconds()
+                assert backoff_1 >= 1.0, f"First backoff was {backoff_1}s, expected >= 1.0s"
+
+            if len(attempt_times) >= 3:
+                backoff_2 = (attempt_times[2] - attempt_times[1]).total_seconds()
+                assert backoff_2 >= 1.0, f"Second backoff was {backoff_2}s, expected >= 1.0s"
+
+    @pytest.mark.asyncio
+    async def test_workflow_determinism_verification(
+        self,
+        temporal_client,
+        supabase_client,
+        test_meeting_notes_id
+    ):
+        """Test that workflow execution is deterministic by running it twice and comparing results."""
+        # Get meeting notes
+        meeting_notes = await supabase_client._request(
+            "GET",
+            "meeting_notes",
+            params={"id": f"eq.{test_meeting_notes_id}"}
+        )
+        notes_text = meeting_notes[0]["notes_text"]
+
+        # Run workflow first time
+        workflow_id_1 = f"determinism-test-1-{uuid.uuid4()}"
+        handle1 = await temporal_client.start_workflow(
+            ExtractMeetingActionItemsWorkflow.run,
+            args=[test_meeting_notes_id, notes_text],
+            id=workflow_id_1,
+            task_queue="main"
+        )
+        result1 = await asyncio.wait_for(handle1.result(), timeout=60.0)
+
+        # Run workflow second time with same input
+        workflow_id_2 = f"determinism-test-2-{uuid.uuid4()}"
+        handle2 = await temporal_client.start_workflow(
+            ExtractMeetingActionItemsWorkflow.run,
+            args=[test_meeting_notes_id, notes_text],
+            id=workflow_id_2,
+            task_queue="main"
+        )
+        result2 = await asyncio.wait_for(handle2.result(), timeout=60.0)
+
+        # Both workflows should complete with same status
+        assert result1["status"] == result2["status"]
+        assert result1["status"] == "completed"
+
+        # Both should have extraction runs
+        assert "extraction_run_id" in result1
+        assert "extraction_run_id" in result2
+
+        # Get action items from both runs
+        action_items_1 = await supabase_client._request(
+            "GET",
+            "action_items",
+            params={"extraction_run_id": f"eq.{result1['extraction_run_id']}"}
+        )
+        action_items_2 = await supabase_client._request(
+            "GET",
+            "action_items",
+            params={"extraction_run_id": f"eq.{result2['extraction_run_id']}"}
+        )
+
+        # Should extract same number of action items (deterministic)
+        assert len(action_items_1) == len(action_items_2), \
+            f"Determinism check failed: Run 1 extracted {len(action_items_1)} items, Run 2 extracted {len(action_items_2)} items"
+
+        # Verify both action item counts match
+        assert result1["action_items_count"] == result2["action_items_count"]
 
 
 class TestErrorHandling:

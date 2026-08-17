@@ -1,132 +1,200 @@
 #!/bin/bash
+
+# Complete E2E Test Suite Runner
+# Validates all required services and runs comprehensive test suite
+
 set -e
 
-echo "================================================"
-echo "Meeting Notes Extraction - E2E Test Suite"
-echo "================================================"
-echo ""
-
-# Colors for output
+# Color codes for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Check if services are running
-echo "${YELLOW}Checking required services...${NC}"
+# Test report locations
+BACKEND_REPORT="./backend/test-reports"
+FRONTEND_REPORT="./frontend/playwright-report"
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 
-# Check Supabase
-if ! curl -s http://localhost:54321/health > /dev/null; then
-    echo "${RED}✗ Supabase is not running${NC}"
-    echo "  Start with: supabase start"
+echo -e "${BLUE}========================================${NC}"
+echo -e "${BLUE}  E2E Test Suite Execution${NC}"
+echo -e "${BLUE}  Started: $(date)${NC}"
+echo -e "${BLUE}========================================${NC}"
+echo ""
+
+# Function to check service health
+check_service() {
+    local service_name=$1
+    local health_url=$2
+    local max_retries=5
+    local retry_count=0
+
+    echo -e "${YELLOW}Checking ${service_name}...${NC}"
+
+    while [ $retry_count -lt $max_retries ]; do
+        if curl -sf "$health_url" > /dev/null 2>&1; then
+            echo -e "${GREEN}✓ ${service_name} is running${NC}"
+            return 0
+        fi
+        retry_count=$((retry_count + 1))
+        if [ $retry_count -lt $max_retries ]; then
+            echo -e "${YELLOW}  Retry $retry_count/$max_retries...${NC}"
+            sleep 2
+        fi
+    done
+
+    echo -e "${RED}✗ ${service_name} is not responding${NC}"
+    return 1
+}
+
+# Function to run command with status reporting
+run_test_suite() {
+    local suite_name=$1
+    local command=$2
+
+    echo ""
+    echo -e "${BLUE}----------------------------------------${NC}"
+    echo -e "${BLUE}Running: ${suite_name}${NC}"
+    echo -e "${BLUE}----------------------------------------${NC}"
+
+    if eval "$command"; then
+        echo -e "${GREEN}✓ ${suite_name} PASSED${NC}"
+        return 0
+    else
+        echo -e "${RED}✗ ${suite_name} FAILED${NC}"
+        return 1
+    fi
+}
+
+# Track overall test status
+TESTS_PASSED=0
+TESTS_FAILED=0
+SERVICES_OK=true
+
+# Service Health Checks
+echo -e "${BLUE}Step 1: Service Health Checks${NC}"
+echo "================================"
+
+if ! check_service "Supabase" "http://localhost:54321/rest/v1/"; then
+    SERVICES_OK=false
+fi
+
+if ! check_service "Temporal" "http://localhost:7233"; then
+    SERVICES_OK=false
+fi
+
+if ! check_service "API Server" "http://localhost:8000/health"; then
+    SERVICES_OK=false
+fi
+
+if ! check_service "Frontend" "http://localhost:3000"; then
+    SERVICES_OK=false
+fi
+
+if [ "$SERVICES_OK" = false ]; then
+    echo ""
+    echo -e "${RED}========================================${NC}"
+    echo -e "${RED}  ERROR: Not all services are running${NC}"
+    echo -e "${RED}  Please start all required services${NC}"
+    echo -e "${RED}========================================${NC}"
     exit 1
 fi
-echo "${GREEN}✓ Supabase is running${NC}"
 
-# Check Temporal
-if ! curl -s http://localhost:8080 > /dev/null; then
-    echo "${RED}✗ Temporal UI is not accessible${NC}"
-    echo "  Start with: docker compose up temporal temporal-db"
+echo -e "${GREEN}All services are running!${NC}"
+echo ""
+
+# Backend Integration Tests
+echo -e "${BLUE}Step 2: Backend Integration Tests${NC}"
+echo "=================================="
+
+if run_test_suite "Backend Integration Tests (pytest)" "cd backend && pytest tests/integration/ -v --tb=short --html=$BACKEND_REPORT/report_${TIMESTAMP}.html --self-contained-html"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+
+# Frontend Playwright Tests
+echo ""
+echo -e "${BLUE}Step 3: Frontend E2E Tests (Playwright)${NC}"
+echo "========================================"
+
+# Complete Flow Tests
+if run_test_suite "Complete Flow Tests" "cd frontend && npx playwright test tests/e2e/complete-flow.spec.ts"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+
+# Error Handling Tests
+if run_test_suite "Error Handling Tests" "cd frontend && npx playwright test tests/e2e/error-handling.spec.ts"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+
+# Status Polling Tests
+if run_test_suite "Status Polling Tests" "cd frontend && npx playwright test tests/e2e/status-polling.spec.ts"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+
+# Multi-Browser Tests
+if run_test_suite "Multi-Browser Tests" "cd frontend && npx playwright test --project=chromium --project=firefox --project=webkit"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+
+# Accessibility Tests
+if run_test_suite "Accessibility Tests" "cd frontend && npx playwright test tests/e2e/accessibility.spec.ts"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+
+# Responsive Design Tests
+if run_test_suite "Responsive Design Tests" "cd frontend && npx playwright test tests/e2e/responsive.spec.ts"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+
+# Test Summary
+echo ""
+echo -e "${BLUE}========================================${NC}"
+echo -e "${BLUE}  Test Execution Summary${NC}"
+echo -e "${BLUE}========================================${NC}"
+echo -e "Completed: $(date)"
+echo ""
+echo -e "Test Suites Passed: ${GREEN}${TESTS_PASSED}${NC}"
+echo -e "Test Suites Failed: ${RED}${TESTS_FAILED}${NC}"
+echo ""
+
+# Report Locations
+echo -e "${BLUE}Test Report Locations:${NC}"
+echo "----------------------"
+echo -e "Backend Reports:  ${YELLOW}${BACKEND_REPORT}/${NC}"
+echo -e "Frontend Reports: ${YELLOW}${FRONTEND_REPORT}/${NC}"
+echo ""
+
+# View reports commands
+echo -e "${BLUE}View Reports:${NC}"
+echo "-------------"
+echo -e "Backend:  ${YELLOW}open ${BACKEND_REPORT}/report_${TIMESTAMP}.html${NC}"
+echo -e "Frontend: ${YELLOW}npx playwright show-report${NC}"
+echo ""
+
+# Exit with appropriate status
+if [ $TESTS_FAILED -eq 0 ]; then
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}  ALL TESTS PASSED!${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    exit 0
+else
+    echo -e "${RED}========================================${NC}"
+    echo -e "${RED}  SOME TESTS FAILED${NC}"
+    echo -e "${RED}========================================${NC}"
     exit 1
 fi
-echo "${GREEN}✓ Temporal is running${NC}"
-
-# Check API Server
-if ! curl -s http://localhost:8000/health > /dev/null; then
-    echo "${RED}✗ API Server is not running${NC}"
-    echo "  Start with: cd temporal && python start_all.py"
-    exit 1
-fi
-echo "${GREEN}✓ API Server is running${NC}"
-
-# Check Frontend
-if ! curl -s http://localhost:3000 > /dev/null; then
-    echo "${RED}✗ Frontend is not running${NC}"
-    echo "  Start with: cd frontend && npm run dev"
-    exit 1
-fi
-echo "${GREEN}✓ Frontend is running${NC}"
-
-echo ""
-echo "================================================"
-echo "Running Backend Integration Tests"
-echo "================================================"
-echo ""
-
-cd temporal
-if pytest tests/test_e2e_workflow.py -v --tb=short; then
-    echo "${GREEN}✓ Backend integration tests passed${NC}"
-else
-    echo "${RED}✗ Backend integration tests failed${NC}"
-    exit 1
-fi
-
-echo ""
-echo "================================================"
-echo "Running Frontend E2E Tests"
-echo "================================================"
-echo ""
-
-cd ../frontend
-
-echo ""
-echo "${YELLOW}1. Complete Extraction Flow Tests${NC}"
-if npm run test:e2e -- complete-extraction-flow --reporter=line; then
-    echo "${GREEN}✓ Complete extraction flow tests passed${NC}"
-else
-    echo "${RED}✗ Complete extraction flow tests failed${NC}"
-fi
-
-echo ""
-echo "${YELLOW}2. Error Handling Tests${NC}"
-if npm run test:e2e -- error-handling --reporter=line; then
-    echo "${GREEN}✓ Error handling tests passed${NC}"
-else
-    echo "${RED}✗ Error handling tests failed${NC}"
-fi
-
-echo ""
-echo "${YELLOW}3. Status Polling Tests${NC}"
-if npm run test:e2e -- status-polling --reporter=line; then
-    echo "${GREEN}✓ Status polling tests passed${NC}"
-else
-    echo "${RED}✗ Status polling tests failed${NC}"
-fi
-
-echo ""
-echo "${YELLOW}4. Multi-Browser Tests${NC}"
-if npm run test:e2e -- multi-browser --reporter=line; then
-    echo "${GREEN}✓ Multi-browser tests passed${NC}"
-else
-    echo "${RED}✗ Multi-browser tests failed${NC}"
-fi
-
-echo ""
-echo "${YELLOW}5. Accessibility Tests${NC}"
-if npm run test:e2e -- accessibility --reporter=line; then
-    echo "${GREEN}✓ Accessibility tests passed${NC}"
-else
-    echo "${RED}✗ Accessibility tests failed${NC}"
-fi
-
-echo ""
-echo "${YELLOW}6. Responsive Design Tests${NC}"
-if npm run test:e2e -- responsive-design --reporter=line; then
-    echo "${GREEN}✓ Responsive design tests passed${NC}"
-else
-    echo "${RED}✗ Responsive design tests failed${NC}"
-fi
-
-echo ""
-echo "================================================"
-echo "Test Suite Complete"
-echo "================================================"
-echo ""
-echo "${GREEN}All E2E tests completed successfully!${NC}"
-echo ""
-echo "Test Reports:"
-echo "  - Frontend: frontend/playwright-report/index.html"
-echo "  - Backend: temporal/htmlcov/index.html (if --cov was used)"
-echo ""
-echo "View report: npm run test:e2e:report"
-echo ""

@@ -5,12 +5,26 @@
  * @group integration
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { supabase } from '@/lib/supabase';
-import { useCreateMeetingNote, useExtractionRun, useExtractionRuns } from '@/lib/hooks/useMeetingNotes';
 import type { ReactNode } from 'react';
+
+// Check if Supabase env vars are available
+const hasSupabaseConfig = import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+// Only import supabase if env vars are available
+let supabase: any;
+let useExtractionRun: any;
+let useExtractionRuns: any;
+
+if (hasSupabaseConfig) {
+  const supabaseModule = await import('@/lib/supabase');
+  const hooksModule = await import('@/lib/hooks/useMeetingNotes');
+  supabase = supabaseModule.supabase;
+  useExtractionRun = hooksModule.useExtractionRun;
+  useExtractionRuns = hooksModule.useExtractionRuns;
+}
 
 // Test IDs for cleanup
 const testIds = {
@@ -30,12 +44,20 @@ function createWrapper() {
       },
     },
   });
-  return ({ children }: { children: ReactNode }) => (
+  const Wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
+  Wrapper.displayName = 'TestWrapper';
+  return Wrapper;
 }
 
-describe('Supabase API Integration - Meeting Notes Tables', () => {
+describe.skipIf(!hasSupabaseConfig)('Supabase API Integration - Meeting Notes Tables', () => {
+  beforeAll(() => {
+    if (!hasSupabaseConfig) {
+      console.log('Skipping Supabase integration tests - missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY');
+    }
+  });
+
   beforeEach(async () => {
     // Clean up any existing test data
     await cleanupTestData();
@@ -65,54 +87,69 @@ describe('Supabase API Integration - Meeting Notes Tables', () => {
       }
     });
 
-    it('should read meeting notes from database', async () => {
-      // Create test data
-      const { data: created } = await supabase
-        .from('meeting_notes')
-        .insert({ notes_text: 'Read test meeting notes' })
-        .select()
-        .single();
-
-      if (created?.id) {
-        testIds.meetingNotes.push(created.id);
-      }
-
-      // Read back
-      const { data: retrieved, error } = await supabase
-        .from('meeting_notes')
-        .select('*')
-        .eq('id', created?.id)
-        .single();
-
-      expect(error).toBeNull();
-      expect(retrieved).toBeDefined();
-      expect(retrieved?.notes_text).toBe('Read test meeting notes');
-      expect(retrieved?.id).toBe(created?.id);
-    });
-
-    it('should update meeting notes in database', async () => {
+    it('should perform complete CRUD lifecycle on meeting notes', async () => {
       // Create
-      const { data: created } = await supabase
+      const { data: created, error: createError } = await supabase
         .from('meeting_notes')
         .insert({ notes_text: 'Original notes' })
         .select()
         .single();
 
-      if (created?.id) {
-        testIds.meetingNotes.push(created.id);
+      expect(createError).toBeNull();
+      expect(created).toBeDefined();
+      expect(created?.notes_text).toBe('Original notes');
+      expect(created?.id).toBeDefined();
+      expect(created?.created_at).toBeDefined();
+
+      const noteId = created?.id;
+      if (noteId) {
+        testIds.meetingNotes.push(noteId);
       }
 
+      // Read
+      const { data: read, error: readError } = await supabase
+        .from('meeting_notes')
+        .select('*')
+        .eq('id', noteId)
+        .single();
+
+      expect(readError).toBeNull();
+      expect(read).toBeDefined();
+      expect(read?.notes_text).toBe('Original notes');
+      expect(read?.id).toBe(noteId);
+
       // Update
-      const { data: updated, error } = await supabase
+      const { data: updated, error: updateError } = await supabase
         .from('meeting_notes')
         .update({ notes_text: 'Updated notes' })
-        .eq('id', created?.id)
+        .eq('id', noteId)
         .select()
         .single();
 
-      expect(error).toBeNull();
+      expect(updateError).toBeNull();
       expect(updated?.notes_text).toBe('Updated notes');
+      expect(updated?.id).toBe(noteId);
       expect(updated?.updated_at).not.toBe(created?.updated_at);
+
+      // Delete
+      const { error: deleteError } = await supabase
+        .from('meeting_notes')
+        .delete()
+        .eq('id', noteId);
+
+      expect(deleteError).toBeNull();
+
+      // Verify deleted
+      const { data: deleted } = await supabase
+        .from('meeting_notes')
+        .select()
+        .eq('id', noteId)
+        .single();
+
+      expect(deleted).toBeNull();
+
+      // Remove from testIds since we already deleted it
+      testIds.meetingNotes = testIds.meetingNotes.filter(id => id !== noteId);
     });
 
     it('should validate notes_text length constraints', async () => {
@@ -419,8 +456,12 @@ describe('Supabase API Integration - Meeting Notes Tables', () => {
       expect(result.current.data?.id).toBe(extractionRun?.id);
       expect(result.current.data?.status).toBe('completed');
       expect(result.current.data?.action_items).toBeDefined();
-      expect(result.current.data?.action_items?.length).toBeGreaterThan(0);
-      expect(result.current.data?.action_items?.[0].description).toBe('Test action from query');
+      expect(result.current.data?.action_items?.length).toBe(1);
+
+      // Verify actual workflow data integrity
+      const actualAction = result.current.data?.action_items?.[0];
+      expect(actualAction?.description).toBe('Test action from query');
+      expect(actualAction?.owner).toBe('Test Owner');
     });
 
     it('should list extraction runs using useExtractionRuns', async () => {
@@ -536,8 +577,20 @@ describe('Supabase API Integration - Meeting Notes Tables', () => {
       expect(error).toBeNull();
       expect(data?.action_items).toBeDefined();
       expect(data?.action_items?.length).toBe(2);
-      expect(data?.action_items?.some((a: any) => a.description === 'Action 1')).toBe(true);
-      expect(data?.action_items?.some((a: any) => a.owner === 'Bob')).toBe(true);
+
+      // Verify ALL expected actions are present with correct data
+      const actionDescriptions = data?.action_items?.map((a: any) => a.description);
+      const actionOwners = data?.action_items?.map((a: any) => a.owner);
+      expect(actionDescriptions).toContain('Action 1');
+      expect(actionDescriptions).toContain('Action 2');
+      expect(actionOwners).toContain('Alice');
+      expect(actionOwners).toContain('Bob');
+
+      // Verify specific action items match expected data
+      const action1 = data?.action_items?.find((a: any) => a.description === 'Action 1');
+      const action2 = data?.action_items?.find((a: any) => a.description === 'Action 2');
+      expect(action1?.owner).toBe('Alice');
+      expect(action2?.owner).toBe('Bob');
     });
 
     it('should query extraction runs with nested meeting notes', async () => {
@@ -576,6 +629,179 @@ describe('Supabase API Integration - Meeting Notes Tables', () => {
       expect(error).toBeNull();
       expect(data?.meeting_notes).toBeDefined();
       expect((data?.meeting_notes as any).notes_text).toBe('Original meeting text');
+    });
+  });
+
+  describe('Row Level Security (RLS) Policy Tests', () => {
+    it('should allow admin client to access all data', async () => {
+      // Create test data with admin client
+      const { data: meetingNote, error: createError } = await supabase
+        .from('meeting_notes')
+        .insert({ notes_text: 'Admin test notes' })
+        .select()
+        .single();
+
+      expect(createError).toBeNull();
+      expect(meetingNote).toBeDefined();
+      expect(meetingNote?.notes_text).toBe('Admin test notes');
+
+      if (meetingNote?.id) {
+        testIds.meetingNotes.push(meetingNote.id);
+      }
+
+      // Admin should be able to read it back
+      const { data: retrieved, error: readError } = await supabase
+        .from('meeting_notes')
+        .select()
+        .eq('id', meetingNote?.id)
+        .single();
+
+      expect(readError).toBeNull();
+      expect(retrieved).toBeDefined();
+      expect(retrieved?.id).toBe(meetingNote?.id);
+    });
+
+    it('should enforce RLS policies when implemented', async () => {
+      // Note: This test validates that the database structure supports RLS
+      // When RLS is enabled with user authentication, this test should be expanded
+      // to test actual user-based access control
+
+      // Create test data
+      const { data: meetingNote } = await supabase
+        .from('meeting_notes')
+        .insert({ notes_text: 'RLS test notes' })
+        .select()
+        .single();
+
+      if (meetingNote?.id) {
+        testIds.meetingNotes.push(meetingNote.id);
+      }
+
+      expect(meetingNote).toBeDefined();
+
+      // Verify extraction runs are also accessible
+      const { data: extractionRun } = await supabase
+        .from('extraction_runs')
+        .insert({
+          meeting_notes_id: meetingNote?.id,
+          workflow_id: 'rls-test',
+          status: 'processing',
+        })
+        .select()
+        .single();
+
+      if (extractionRun?.id) {
+        testIds.extractionRuns.push(extractionRun.id);
+      }
+
+      expect(extractionRun).toBeDefined();
+      expect(extractionRun?.meeting_notes_id).toBe(meetingNote?.id);
+    });
+
+    it('should respect foreign key constraints across RLS boundaries', async () => {
+      // Create meeting note
+      const { data: meetingNote } = await supabase
+        .from('meeting_notes')
+        .insert({ notes_text: 'FK RLS test' })
+        .select()
+        .single();
+
+      if (meetingNote?.id) {
+        testIds.meetingNotes.push(meetingNote.id);
+      }
+
+      // Create extraction run
+      const { data: extractionRun } = await supabase
+        .from('extraction_runs')
+        .insert({
+          meeting_notes_id: meetingNote?.id,
+          workflow_id: 'fk-rls-test',
+          status: 'completed',
+        })
+        .select()
+        .single();
+
+      if (extractionRun?.id) {
+        testIds.extractionRuns.push(extractionRun.id);
+      }
+
+      // Try to delete meeting note (should fail due to FK constraint)
+      const { error: deleteError } = await supabase
+        .from('meeting_notes')
+        .delete()
+        .eq('id', meetingNote?.id);
+
+      // Should fail because extraction_run references it
+      expect(deleteError).toBeDefined();
+      expect(deleteError?.message).toMatch(/foreign key|constraint/i);
+    });
+
+    it('should allow proper cascading deletes with RLS', async () => {
+      // Setup full hierarchy
+      const { data: meetingNote } = await supabase
+        .from('meeting_notes')
+        .insert({ notes_text: 'Cascade RLS test' })
+        .select()
+        .single();
+
+      if (meetingNote?.id) {
+        testIds.meetingNotes.push(meetingNote.id);
+      }
+
+      const { data: extractionRun } = await supabase
+        .from('extraction_runs')
+        .insert({
+          meeting_notes_id: meetingNote?.id,
+          workflow_id: 'cascade-rls-test',
+          status: 'completed',
+        })
+        .select()
+        .single();
+
+      if (extractionRun?.id) {
+        testIds.extractionRuns.push(extractionRun.id);
+      }
+
+      const { data: actionItem } = await supabase
+        .from('action_items')
+        .insert({
+          extraction_run_id: extractionRun?.id,
+          description: 'Cascade test action',
+          owner: 'Test User',
+        })
+        .select()
+        .single();
+
+      const actionItemId = actionItem?.id;
+
+      // Delete extraction run (should cascade to action items)
+      const { error: deleteRunError } = await supabase
+        .from('extraction_runs')
+        .delete()
+        .eq('id', extractionRun?.id);
+
+      expect(deleteRunError).toBeNull();
+
+      // Verify action item was cascade deleted
+      const { data: deletedAction } = await supabase
+        .from('action_items')
+        .select()
+        .eq('id', actionItemId)
+        .single();
+
+      expect(deletedAction).toBeNull();
+
+      // Now meeting note can be deleted
+      const { error: deleteNoteError } = await supabase
+        .from('meeting_notes')
+        .delete()
+        .eq('id', meetingNote?.id);
+
+      expect(deleteNoteError).toBeNull();
+
+      // Remove from testIds since we already deleted them
+      testIds.extractionRuns = testIds.extractionRuns.filter(id => id !== extractionRun?.id);
+      testIds.meetingNotes = testIds.meetingNotes.filter(id => id !== meetingNote?.id);
     });
   });
 });

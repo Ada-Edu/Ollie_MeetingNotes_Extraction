@@ -136,8 +136,8 @@ Example:
           <ul className="text-sm text-gray-600 space-y-1 list-disc list-inside">
             <li>Include clear action items with verbs (review, schedule, follow up, etc.)</li>
             <li>Mention owner names when available</li>
-            <li>Specify due dates when mentioned (e.g., "by Friday", "next week")</li>
-            <li>The AI won't hallucinate - unclear owners/dates will show as "Unassigned"/"No due date"</li>
+            <li>Specify due dates when mentioned (e.g., &ldquo;by Friday&rdquo;, &ldquo;next week&rdquo;)</li>
+            <li>The AI won&apos;t hallucinate - unclear owners/dates will show as &ldquo;Unassigned&rdquo;/&ldquo;No due date&rdquo;</li>
           </ul>
         </div>
       )}
